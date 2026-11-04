@@ -1,18 +1,13 @@
 # Netlify serves only the frontend, so the protections nginx gives the local
-# stack are repeated here. Set SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in
-# Netlify's environment settings. Replace the API host below before deploying.
+# stack are repeated here. The build needs SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY
+# and BACKEND_URL.
 
+# The build writes dist/_redirects with a same-origin proxy to the backend: the
+# browser never calls another site, so the API needs no CORS rules. Netlify reads
+# _redirects first, so that rule stays ahead of the page fallback below.
 [build]
-  command = "npm ci && npm run build"
+  command = "npm ci && npm run build && node scripts/write-redirects.mjs"
   publish = "dist"
-
-# Same-origin proxy to the backend: the browser never calls another site, so the
-# API needs no CORS rules. A rule with force stays ahead of the page fallback.
-[[redirects]]
-  from = "/api/*"
-  to = "https://REPLACE-WITH-YOUR-BACKEND-HOST/:splat"
-  status = 200
-  force = true
 
 [[redirects]]
   from = "/*"
