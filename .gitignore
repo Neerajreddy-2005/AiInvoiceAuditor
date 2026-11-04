@@ -1,0 +1,37 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+service-account*.json
+
+# Invoices stay private unless they are a named sample below, so a real invoice
+# dropped into the watched folder can't be published by accident.
+data/incoming/*
+!data/incoming/INV_*
+data/reports/
+.claude/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# local output
+outputs/
+logs/
+*.log
+
+# knowledge graph
+graphify-out/
+
+# frontend
+node_modules/
+dist/

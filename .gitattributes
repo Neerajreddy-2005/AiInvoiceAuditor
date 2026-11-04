@@ -1,0 +1,6 @@
+# Init scripts run inside Linux containers: keep LF line endings on Windows checkouts.
+*.sh   text eol=lf
+*.sql  text eol=lf
+*.yaml text eol=lf
+*.py   text eol=lf
+Dockerfile text eol=lf

@@ -1,0 +1,94 @@
+# =============================================================
+# AI Invoice Auditor – Agent runtime settings (non-secret)
+# =============================================================
+# Secrets and hostnames come from the environment (.env / compose).
+# Model IDs can be overridden with CHAT_MODEL and EMBED_MODEL in .env.
+
+monitor:
+  poll_interval_seconds: 10
+  # A file must be unchanged for this long before it is processed
+  # (avoids reading a file that is still being copied in).
+  min_file_age_seconds: 3
+  # Failed invoices are resumed from their LangGraph checkpoint,
+  # at most this many attempts in total.
+  max_attempts: 3
+  retry_backoff_seconds: 60
+  # Each new file spends Gemini quota; any others wait for the next scan.
+  max_new_files_per_scan: 20
+  # The index sweep gives up on an invoice after this many failures, until a restart.
+  max_index_failures: 5
+  index_retry_delay_seconds: 60
+  supported_extensions:
+    .pdf: pdf
+    .docx: docx
+    .png: image
+    .jpg: image
+    .jpeg: image
+    .tif: image
+    .tiff: image
+
+extraction:
+  # A PDF page with fewer characters than this is treated as having
+  # no text layer and is OCR'd instead.
+  min_text_chars_per_page: 20
+  # Over-limit files fail as one invoice instead of exhausting the agent.
+  limits:
+    max_file_mb: 25
+    max_pdf_pages: 50
+    max_docx_xml_mb: 5
+    max_image_pixels: 40000000
+    max_text_chars: 100000
+    ocr_timeout_seconds: 120
+    # Parsing runs in a separate process that is stopped at these limits.
+    max_document_seconds: 600
+    max_parser_memory_mb: 2048
+  ocr:
+    languages: eng+deu+spa
+    dpi: 300
+    psm: 6
+    # Images narrower than this are upscaled before OCR.
+    min_width_px: 1800
+
+llm:
+  # Gemini API free tier via LiteLLM (in-process). One model handles
+  # every chat task. embedding_dimensions must match the embedding model.
+  chat_model: gemini/gemini-3.5-flash-lite
+  embedding_model: gemini/gemini-embedding-001
+  embedding_dimensions: 3072
+  timeout_seconds: 60
+  num_retries: 2
+  max_input_chars: 12000
+
+cache:
+  # Redis is disposable: flushing it only makes the system slower.
+  llm_ttl_seconds: 604800          # 7 days
+  translation_ttl_seconds: 2592000 # 30 days
+  embedding_ttl_seconds: 2592000   # 30 days
+  rag_answer_ttl_seconds: 3600     # 1 hour
+
+# Per reviewer. These actions spend Gemini quota or hold a worker thread.
+rate_limits:
+  # One question can make over a dozen Gemini calls.
+  query: {calls: 5, per_seconds: 60}
+  query_daily: {calls: 200, per_seconds: 86400}
+  revalidate: {calls: 6, per_seconds: 60}
+  feedback: {calls: 60, per_seconds: 60}
+  retry: {calls: 10, per_seconds: 60}
+  scan: {calls: 6, per_seconds: 60}
+  reindex: {calls: 3, per_seconds: 3600}
+
+translation:
+  # langdetect probability needed to trust its answer without a hint
+  min_detection_probability: 0.90
+
+rag:
+  collection: invoice_chunks
+  chunk_size_chars: 800
+  chunk_overlap_chars: 120
+  top_k: 8
+  # Each retry widens the search by this many extra candidates.
+  top_k_step: 8
+  rerank_keep: 5
+  # Answer is shown when the RAG Triad average is strictly above this.
+  pass_threshold: 0.7
+  max_attempts: 3

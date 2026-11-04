@@ -1,0 +1,134 @@
+# AI Invoice Auditor – local services on one user-defined bridge network.
+# The database and login are on Supabase; the agent and mock-erp reach them
+# through the session pooler using the values in .env.
+# Start everything:   docker compose up --build -d
+# Services address each other by service name and CONTAINER port
+# (e.g. mock-erp:8000), never by localhost, IP, or host port.
+# No secret values appear here: compose fills them in from .env, and each
+# service receives only the variables it needs.
+# Host ports are bound to 127.0.0.1, so they are not reachable from the network.
+
+name: invoice-auditor
+
+services:
+  # ------------------------------------------------------------------ data
+  qdrant:
+    image: qdrant/qdrant:v1.15.5
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?Set QDRANT_API_KEY in .env}
+      QDRANT__SERVICE__ENABLE_CORS: "false"
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # The image has no curl; ask /readyz over bash's /dev/tcp and require 200.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    networks: [invoice-net]
+
+  redis:
+    image: redis:7.4.6
+    # Disposable cache: no persistence, bounded memory, LRU eviction.
+    command: ["redis-server", "--save", "", "--appendonly", "no",
+              "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru",
+              "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    # No host port: only the agent shares its network.
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    networks: [cache-net]
+
+  # ------------------------------------------------------------------ apps
+  mock-erp:
+    build: ./backend/Mock-ERP
+    image: invoice-auditor/mock-erp:1.0
+    environment:
+      DB_HOST: ${SUPABASE_DB_HOST}
+      DB_PORT: ${SUPABASE_DB_PORT:-5432}
+      POSTGRES_DB: postgres
+      ERP_DB_USER: ${ERP_DB_USER}.${SUPABASE_PROJECT_REF}
+      ERP_DB_PASSWORD: ${ERP_DB_PASSWORD}
+      DB_SSLROOTCERT: ${DB_SSLROOTCERT:-}
+      ERP_SERVICE_TOKEN: ${ERP_SERVICE_TOKEN:?Set ERP_SERVICE_TOKEN in .env}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "127.0.0.1:8001:8000"          # host 8001 -> container 8000; other containers use mock-erp:8000
+    volumes:
+      - ./backend/certs:/certs:ro      # Supabase's public CA certificate, if downloaded
+    restart: on-failure:3
+    networks: [invoice-net]
+
+  agent:
+    build: ./backend/Agent
+    image: invoice-auditor/agent:1.0
+    environment:
+      DB_HOST: ${SUPABASE_DB_HOST}
+      DB_PORT: ${SUPABASE_DB_PORT:-5432}
+      POSTGRES_DB: postgres
+      AGENT_DB_USER: ${AGENT_DB_USER}.${SUPABASE_PROJECT_REF}
+      SUPABASE_URL: ${SUPABASE_URL}
+      AGENT_DB_PASSWORD: ${AGENT_DB_PASSWORD}
+      DB_SSLROOTCERT: ${DB_SSLROOTCERT:-}
+      REVIEWER_EMAILS: ${REVIEWER_EMAILS:?Set REVIEWER_EMAILS in .env}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      CHAT_MODEL: ${CHAT_MODEL:-}
+      EMBED_MODEL: ${EMBED_MODEL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      ERP_BASE_URL: http://mock-erp:8000
+      ERP_SERVICE_TOKEN: ${ERP_SERVICE_TOKEN}
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Development convenience; production would read from object storage (S3).
+      - ./data/incoming:/data/incoming:ro
+      - ./backend/configs:/app/configs:ro
+      - ./backend/certs:/certs:ro      # Supabase's public CA certificate, if downloaded
+      - reports_data:/data/reports
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-erp:
+        condition: service_healthy
+    restart: on-failure:3
+    networks: [invoice-net, cache-net]
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        SUPABASE_URL: ${SUPABASE_URL}
+        SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY}
+    image: invoice-auditor/frontend:1.0
+    ports:
+      - "127.0.0.1:3000:8080"
+    depends_on:
+      agent:
+        condition: service_healthy
+    restart: on-failure:3
+    networks: [invoice-net]
+
+volumes:
+  qdrant_data:      # RAG index (derived; rebuildable from the audit data on Supabase)
+  reports_data:     # generated JSON/HTML report files
+
+networks:
+  invoice-net:
+    driver: bridge
+  cache-net:
+    driver: bridge
+    internal: true

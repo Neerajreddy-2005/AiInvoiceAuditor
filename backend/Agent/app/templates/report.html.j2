@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Audit report – {{ r.invoice.invoice_number or r.file_name }}</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; color: #1f2937; margin: 24px; line-height: 1.45; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 28px 0 8px; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; }
+  .muted { color: #6b7280; font-size: 13px; }
+  .badge { display: inline-block; padding: 6px 14px; border-radius: 999px; font-weight: 600; margin: 12px 0; }
+  .approve { background: #dcfce7; color: #166534; }
+  .review  { background: #fef3c7; color: #92400e; }
+  .reject  { background: #fee2e2; color: #991b1b; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }
+  th { background: #f9fafb; font-weight: 600; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .sev-high { color: #991b1b; font-weight: 600; }
+  .sev-medium { color: #92400e; font-weight: 600; }
+  .sev-low { color: #6b7280; }
+  .summary { background: #f9fafb; border-left: 3px solid #9ca3af; padding: 10px 14px; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+  dt { color: #6b7280; } dd { margin: 0; }
+</style>
+</head>
+<body>
+  <h1>Invoice audit report</h1>
+  <div class="muted">{{ r.file_name }} · run {{ r.run_number }} ({{ r.trigger }}{% if r.triggered_by %} by {{ r.triggered_by }}{% endif %}) · generated {{ r.generated_at }}</div>
+
+  <div class="badge {{ r.recommendation }}">{{ labels[r.recommendation] }}</div>
+  <ul>{% for reason in r.recommendation_reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
+
+  {% if r.summary %}<h2>Summary</h2><p class="summary">{{ r.summary }}</p>{% endif %}
+
+  <h2>Invoice</h2>
+  <dl>
+    <dt>Invoice number</dt><dd>{{ r.invoice.invoice_number or "— missing —" }}</dd>
+    <dt>Vendor</dt><dd>{{ r.invoice.vendor_name or "— missing —" }}</dd>
+    <dt>Invoice date</dt><dd>{{ r.invoice.invoice_date or "— missing —" }}</dd>
+    <dt>PO number</dt><dd>{{ r.invoice.po_number or "— missing —" }}</dd>
+    <dt>Currency</dt><dd>{{ r.invoice.currency or "— not stated —" }}</dd>
+    <dt>Subtotal</dt><dd>{{ r.invoice.subtotal_amount or "—" }}</dd>
+    <dt>Tax</dt><dd>{{ r.invoice.tax_amount or "—" }}{% if r.invoice.tax_rate_pct %} ({{ r.invoice.tax_rate_pct }}%){% endif %}</dd>
+    <dt>Total</dt><dd><strong>{{ r.invoice.total_amount or "— missing —" }}</strong></dd>
+    <dt>Extraction</dt><dd>{{ r.extraction_method or "—" }}</dd>
+    {% if r.translation.source_language and r.translation.source_language != "en" %}
+    <dt>Translation</dt><dd>from {{ r.translation.source_language }}, confidence {{ "%.2f"|format(r.translation.confidence or 0) }}</dd>
+    {% endif %}
+  </dl>
+
+  <h2>Line items</h2>
+  <table>
+    <tr><th>#</th><th>Item code</th><th>Description</th><th>Qty</th><th>Unit price</th><th>Line total</th></tr>
+    {% for i in r.line_items %}
+    <tr><td>{{ i.line_number }}</td><td>{{ i.item_code or "—" }}</td><td>{{ i.description or "—" }}</td>
+        <td class="num">{{ i.quantity or "—" }}</td><td class="num">{{ i.unit_price or "—" }}</td><td class="num">{{ i.line_total or "—" }}</td></tr>
+    {% else %}<tr><td colspan="6">No line items could be read.</td></tr>{% endfor %}
+  </table>
+
+  <h2>Discrepancies ({{ r.discrepancy_summary.total }}: {{ r.discrepancy_summary.high }} high, {{ r.discrepancy_summary.medium }} medium, {{ r.discrepancy_summary.low }} low)</h2>
+  <table>
+    <tr><th>Severity</th><th>Field</th><th>Line</th><th>Invoice</th><th>ERP</th><th>Expected</th><th>Deviation</th><th>Detail</th></tr>
+    {% for d in r.discrepancies %}
+    <tr><td class="sev-{{ d.severity }}">{{ d.severity }}</td><td>{{ d.field_name }}</td><td>{{ d.line_number or "" }}</td>
+        <td>{{ d.invoice_value or "" }}</td><td>{{ d.erp_value or "" }}</td><td>{{ d.expected_value or "" }}</td>
+        <td class="num">{% if d.deviation_pct %}{{ d.deviation_pct }}%{% endif %}</td><td>{{ d.message }}</td></tr>
+    {% else %}<tr><td colspan="8">None.</td></tr>{% endfor %}
+  </table>
+
+  {% if r.missing_fields %}
+  <h2>Missing fields</h2>
+  <p>{{ r.missing_fields | join(", ") }}</p>
+  {% endif %}
+
+  {% if r.corrections_applied %}
+  <h2>Auditor corrections applied</h2>
+  <table>
+    <tr><th>Field</th><th>Extracted value</th><th>Corrected value</th><th>By</th><th>When</th></tr>
+    {% for c in r.corrections_applied %}
+    <tr><td>{{ c.field }}</td><td>{{ c.original_value or "—" }}</td><td>{{ c.corrected_value }}</td><td>{{ c.corrected_by }}</td><td>{{ c.corrected_at }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</body>
+</html>

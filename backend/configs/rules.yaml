@@ -1,0 +1,124 @@
+# =============================================================
+# AI Invoice Auditor – Validation Rules Configuration
+# =============================================================
+# Read by the Invoice Data Validation Agent and the Business
+# Validation Agent. Mounted read-only into the agent container,
+# so rules can change without rebuilding the image (restart the
+# agent to pick up changes).
+#
+# Field names match the audit schema columns
+# (audit.invoice_audit / audit.invoice_line_items).
+# =============================================================
+
+# -------------------------------------------------------------
+# 1. General Invoice Requirements
+# -------------------------------------------------------------
+required_fields:
+  header:
+    - invoice_number
+    - invoice_date
+    - vendor_name
+    - currency
+    - total_amount
+  line_item:
+    - item_code
+    - description
+    - quantity
+    - unit_price
+    - line_total
+
+# -------------------------------------------------------------
+# 2. Field Data Type Rules
+# -------------------------------------------------------------
+# Monetary values are handled as Decimal (NUMERIC in PostgreSQL),
+# never float.
+data_types:
+  invoice_number: str
+  invoice_date: date
+  vendor_name: str
+  currency: str
+  total_amount: decimal
+  quantity: decimal
+  unit_price: decimal
+  line_total: decimal
+
+# -------------------------------------------------------------
+# 3. Thresholds
+# -------------------------------------------------------------
+tolerances:
+  # Business tolerances: invoice vs ERP purchase order
+  price_difference_percent: 5       # ±5% tolerance in unit price
+  quantity_difference_percent: 0    # Quantity must match exactly
+  # Local invoice-data checks (the invoice's own arithmetic, not ERP).
+  # These are rounding-level tolerances that absorb cents-level rounding,
+  # not genuine discrepancies.
+  line_total_difference_percent: 1  # qty * unit_price vs the declared line total
+  total_difference_percent: 1       # sum of lines vs subtotal (or total when no tax is stated)
+  tax_difference_percent: 2         # subtotal + tax vs total, and subtotal * rate vs tax
+  # The percentages above are also capped at this amount of money, so on a large
+  # invoice they can't hide a real overcharge.
+  rounding_absolute_limit: 1.00
+  # Name matching (0..1 similarity) between invoice vendor and ERP vendor master
+  vendor_name_min_similarity: 0.85
+  # Minimum similarity for matching an invoice line to a PO line by description
+  # when the invoice carries no item code. Below this the LLM is asked.
+  line_description_min_similarity: 0.70
+
+# -------------------------------------------------------------
+# 4. Currency Validation Rules
+# -------------------------------------------------------------
+accepted_currencies:
+  - USD
+  - EUR
+  - INR
+  - GBP
+
+# Fallback mapping for currency symbols → ISO codes
+currency_symbol_map:
+  "$": "USD"
+  "€": "EUR"
+  "₹": "INR"
+  "£": "GBP"
+
+# -------------------------------------------------------------
+# 5. Validation Policies
+# -------------------------------------------------------------
+# Every check maps to an action:
+#   reject         -> recommendation "reject"            (severity high)
+#   manual_review  -> recommendation "review"            (severity medium)
+#   info           -> recorded, does not block approval  (severity low)
+# The strongest action across all discrepancies decides the recommendation.
+validation_policies:
+  missing_field_action: manual_review       # required field absent from the invoice
+  total_mismatch_action: manual_review      # internal arithmetic does not add up
+  invalid_currency_action: reject           # currency present but not in accepted_currencies
+  duplicate_invoice_action: manual_review   # same vendor + invoice number already audited
+  repeat_po_billing_action: manual_review   # another invoice was already received against this PO
+  po_not_found_action: manual_review        # no PO reference, or PO unknown to ERP
+  vendor_mismatch_action: manual_review     # invoice vendor differs from the PO's vendor
+  currency_mismatch_action: manual_review   # invoice currency differs from PO currency
+  price_mismatch_action: manual_review      # unit price outside price tolerance
+  quantity_mismatch_action: manual_review   # quantity outside quantity tolerance
+  unknown_sku_action: manual_review         # item code not in the SKU master
+  unmatched_line_action: manual_review      # invoice line not found on the PO
+  tax_rate_mismatch_action: manual_review   # invoice tax rate differs from SKU gst_rate
+  uninvoiced_po_line_action: info           # PO line not billed (partial delivery)
+  # An invoice line without an item code that was matched to a PO line
+  # (by description) is recorded as "info" instead of a missing field.
+  allow_item_code_from_po_match: true
+  # Auto-approval requires no blocking discrepancy AND translation
+  # confidence >= this threshold.
+  auto_approve_confidence_threshold: 0.95
+
+# -------------------------------------------------------------
+# 6. Reporting Parameters
+# -------------------------------------------------------------
+# Reports are written to PostgreSQL (system of record) and also as
+# JSON + HTML files on the reports volume (REPORTS_DIR).
+reporting:
+  include_translation_confidence: true
+  include_discrepancy_summary: true
+  formats: ["json", "html"]
+
+# Logging goes to stdout/stderr only (container requirement); the
+# audit trail lives in PostgreSQL, not in a log file.
