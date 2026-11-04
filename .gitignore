@@ -35,3 +35,6 @@ graphify-out/
 # frontend
 node_modules/
 dist/
+
+# private working notes
+*.private.md

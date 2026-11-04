@@ -86,7 +86,7 @@ at runtime, each service getting only the variables listed for it in `compose.ya
 
 | Role | `erp` | `audit` | `langgraph` |
 |---|---|---|---|
-| agent | **none** | SELECT, INSERT, table-wide UPDATE on `invoice_audit` and `validation_runs` (see section 10); no DELETE | can create tables |
+| agent | **none** | SELECT, INSERT, and UPDATE on only the pipeline's columns of `invoice_audit` and `validation_runs`; no DELETE | can create tables |
 | mock-erp | SELECT | none | none |
 
 So the agent *cannot* bypass the mock-erp API, the browser never touches the database, and nobody can delete
@@ -159,7 +159,6 @@ a retry button.
 | INV_DE_004.pdf | Approve* | German, matches PO-1004 |
 | INV_EN_005_scan.png | Review | OCR; no currency printed, and tax is stated without a rate, so it stays Review until both are resolved |
 | INV_EN_006_malformed.pdf | Review | Invoice number and currency missing |
-| Actual_invoice.pdf | Reject | Real-world debit note in VND (not accepted), no PO. Git-ignored, so it isn't in a fresh clone |
 | INV_DE_007.docx | Review | DOCX path; quantity 55 vs PO 60 |
 | INV_EN_002_scanned.pdf | Review | Image-only PDF: shows the OCR fallback (same content as INV_EN_002, different checksum, flagged as duplicate invoice number) |
 
@@ -358,110 +357,35 @@ transitive package pinned; the Dockerfiles install from the lock for reproducibl
 
 ## 10. Project status
 
-Status as of 2026-11-04. The backend runs on Supabase and the new frontend replaces Streamlit. Nothing has been
-committed yet.
+A working end-to-end project, run locally with Docker Compose. It uses sample invoices and a mock ERP, and hosted deployment is planned.
 
-### Built
+### What's built
 
 - A five-container stack: agent, mock ERP, frontend, Qdrant and Redis, with the database and login on Supabase.
 - A React frontend: sign in, invoice list with money held, vendor view and hover previews, review with click-to-correct figures and a decision queue, questions with sources, processing log, light and dark themes.
 - An invoice pipeline: monitor, extract, translate, validate, check against the ERP, report and index.
 - Question answering from fixed SQL queries and RAG, with answer scoring and retries.
-- A human review flow: corrections, re-validation and a permanent audit history.
+- A human review flow: corrections, re-validation and a permanent audit history. The system's recommendation and the reviewer's decision are kept separately.
 
-### Changed
+### Security
 
-- **Models:** moved from AWS Bedrock to the Gemini API free tier, using `gemini-3.5-flash-lite` and
-  `gemini-embedding-001` (3072 dimensions).
-- **Layout:** backend code moved to `backend/`, and an empty `frontend/` was added. `streamlit-ui/` was later removed.
-- **Database:** moved from local PostgreSQL to Supabase, and the API now requires a Supabase login on every route except a bare `/health`. The API docs pages are off.
-- **Cleanup:** removed the old local database and its volume, `backend/Database/init/`, `data/ERP_mock_data/` and the duplicate `data/samples/`. The local run history and 1 test correction went with them.
-- **Repository:** everything in `data/incoming/` is git-ignored except the `INV_*` samples, so real invoices stay private. The sample PDFs had their author and tenant metadata removed; their text is unchanged.
+- **Login:** every API route except a bare `/health` needs a Supabase login, and only accounts in `REVIEWER_EMAILS` are accepted. The reviewer recorded on each change comes from the verified token.
+- **Least privilege:** each service has its own database role and secrets. Nobody can delete from the audit trail, and browser API roles get no access to the data.
+- **Between services:** Mock ERP needs a service token, Qdrant an API key and Redis a password, and placeholder secrets stop startup. Database connections verify the server's certificate.
+- **Untrusted files:** parsing runs in a separate process with no secrets, a memory limit and a deadline, and file size, page and pixel limits are enforced.
+- **AI output is never trusted alone:** recommendations come from fixed rules. An AI line match always needs a person to confirm it, and the model never writes SQL.
+- **Abuse limits:** per-reviewer rate limits on costly actions and a request size limit in the API.
+- **Dependencies:** pinned in lockfiles and scanned with `pip-audit` and `npm audit`.
 
-### Fixed
+The code has had a security review with fixes verified by regression tests. It wasn't a professional penetration test, and a hosted deployment would need its own review.
 
-| Area | Change |
-|---|---|
-| Question answering | Vendor names match regardless of accents and case; answers no longer stay stale after a re-validation |
-| Duplicates | Only invoices detected earlier count, so an original isn't flagged because of a later copy |
-| Validation | Totals must reconcile with line items plus tax; tax without a rate goes to Review; vendor names need more than one shared word; unsafe AI line matches are ignored |
-| Translation | A sidecar language hint alone can't skip review; cached confidence is re-checked when read |
-| Reliability | Invoices interrupted by a restart recover; a retry can't run twice; failed indexing is retried; one bad file no longer stops the others |
-| File limits | Limits on file size, PDF pages, image pixels, Word expansion, extracted text and OCR time; a slow regex is bounded |
-| Corrections | Non-finite and out-of-range numbers are rejected |
-| Network and secrets | Host ports bind to 127.0.0.1; each service gets only its own secrets; Redis has no host port and only the agent can reach it |
-| Word and ERP input | Merged cells are read correctly; PO, vendor and SKU values are escaped in ERP requests |
-| Dashboard | Unfinished runs no longer hide the last good report; the field caption stays current |
-| Login | Only accounts in `REVIEWER_EMAILS` can use the API; anonymous accounts are refused; a revoked signing key stops working within 10 minutes; links can't replace a signed-in session |
-| Access between services | Mock ERP needs a service token, Qdrant an API key and Redis a password; placeholder secrets stop startup |
-| Cost and abuse | Per-reviewer rate limits (`rate_limits` in `agent.yaml`); one index rebuild at a time; a 64 KB request limit in the API itself; the public health route is cached |
-| Billing checks | A second invoice on a PO goes to Review; rounding tolerances are capped at 1.00; invoice totals are compared with the PO value; invoice-number and vendor variants count as duplicates |
-| AI handling | An AI line match always needs a person to confirm it; text in an invoice can't expand prompt placeholders or imitate a passage label; non-finite model scores count as 0 |
-| Decisions | Only completed invoices can be decided, and a re-check reopens the decision |
-| File parsing | Parsing runs in a separate process with no secrets, a memory limit and a deadline; symlinks and special files are skipped; a file changed after detection fails; long runs of spaces can't stall the parser |
-| Dependencies | Both Python lockfiles regenerated: `pip-audit` went from 185 known advisories to 0 |
-| Hosting | `frontend/netlify.toml` carries the security headers, and the API sets its own, so they survive leaving nginx |
+### Testing
 
-### Tested
+Regression tests are in `backend/Agent/tests/` and `backend/Mock-ERP/tests/`, with run commands at the top of each file. They need no database or Gemini access. The full stack was also tested by hand in a browser with a real login.
 
-Earlier testing used temporary Docker projects on empty volumes, removed afterwards, plus one-off scripts. Regression tests
-for the security fixes are now in `backend/Agent/tests/` (44) and `backend/Mock-ERP/tests/` (5), with run commands at the top
-of each file. They need no database or Gemini. **There's still no test suite for the full pipeline.**
+### Known limitations
 
-- All nine invoices processed on a clean start, with results matching section 3. Gemini reported no rate-limit errors.
-- Simulated: restart recovery, double-clicked retry, failed indexing, a stopped ERP, bad AI replies, oversized files and
-  poison files.
-- Confirmed: database role boundaries, per-service secrets, localhost-only ports and Redis isolation.
-- The frontend was checked in a real browser at desktop and phone widths in both themes, using exported API data and a test session.
-- Tested with a real login on the live stack: sign-in and sign-out, filters, opening an invoice, report, document text, history, a rejected bad value, a correction, a re-check, a decision, both kinds of question, the log, health, and the scan button. The retry button and index rebuild weren't exercised. Saving a decision together with moving to the next invoice was tested with the save simulated.
-- `INV-1001` holds test records from this: a same-value correction, run 2 and a decision labelled as a test.
-- With no token or a bad token, the API returned 401 against the running stack.
-
-### Security audit
-
-The audit covered the backend, frontend, login, Supabase setup and publish list, using source review and a no-network
-sandbox. Its verification stage never ran, so it was finished as a smaller review: one independent reviewer checked the fixes
-from source and completed the cost and abuse review, and the results were then fixed or tested directly. **This wasn't the
-full six-phase audit, and the deployed site hasn't been reviewed.** Sign-in, decisions, questions, a re-check and an index
-rebuild were retested through the browser after these fixes. A new invoice hasn't been run through the whole pipeline since then.
-
-### Open issues
-
-| Priority | Issue |
-|---|---|
-| High | On Render, include `backend/certs/prod-ca-2021.crt` in the images and set `DB_SSLROOTCERT`: Compose mounts it locally, and without the setting the database server's identity isn't verified |
-| Medium | A signed-out token works until it expires, so keep the access token lifetime short in Supabase |
-| Medium | Repeat the security review on the deployed site, including Render and Netlify settings the source can't show |
-| Medium | Invoice text can still influence AI answers and summaries. It can no longer clear a finding or change a recommendation by itself |
-| Medium | Rate limits are held in memory, so they reset on restart and assume one agent process. The `/query` limits are per reviewer, not a project-wide Gemini budget |
-| Medium | Parsers share the agent's user and network. Their environment is empty and the agent's is unreadable, but a parser flaw could still reach the network |
-| Medium | Add a test suite for the full pipeline |
-| Medium | The frontend loads only the newest 500 invoices, with no warning (see Future upgrades) |
-| Low | "1.500" is read as 1.5 (the arithmetic check flagged it in testing) |
-| Low | Two invoices on one PO can both miss the repeat check if the first failed before its PO was read and was resumed later; a stale browser tab can still record a decision; the retry button ignores the attempt limit, though it is rate limited |
-| Low | Startup can index some invoices twice; images aren't pinned by digest, and their own CVEs weren't scanned; Python lockfiles have no hashes |
-
-Before using real invoices, check Gemini's free-tier data terms and your Supabase plan's terms: invoice text is sent to Google and stored on Supabase. `Actual_invoice.pdf` has been processed this way at the owner's request.
-
-### Future upgrades
-
-**500-invoice limit.** `GET /invoices` returns the newest 500 rows (`LIMIT` in `repository.list_invoices`), and the frontend does its filtering and totals in the browser on those rows. Past 500 invoices:
-
-- Older invoices can't be found by search or filters.
-- The decision count, verdict strip, money held and progress leave them out.
-- The vendor menu leaves out vendors who only have older invoices.
-- The review queue and previous/next buttons stop at the newest 500.
-- The Ask page's invoice selector lists only those rows. Ask itself still searches the full index.
-
-Upgrade needed before a finance team uses this at volume:
-
-1. Show a warning as soon as the limit is reached.
-2. Add paging, search, verdict and vendor filters to `GET /invoices`, run in SQL.
-3. Add a summary endpoint for counts, money held per currency and progress, computed in SQL.
-4. Add a vendor endpoint so the menu searches all vendors.
-5. Make the review queue ask the server for the next undecided invoice.
-6. Check query plans at the expected volume, and add indexes where they're needed.
-
-### Next
-
-1. Make the first commit.
+- There's no automated test suite for the full pipeline yet.
+- The frontend loads the newest 500 invoices. Larger volumes need paging, filtering and totals in SQL.
+- Invoice text is sent to Gemini and stored on Supabase, so check both providers' data terms before using real invoices.
+- A signed-out access token works until it expires, so keep its lifetime short.
