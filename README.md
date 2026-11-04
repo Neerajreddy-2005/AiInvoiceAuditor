@@ -11,6 +11,10 @@ survive the containers being destroyed and recreated.
 
 ---
 
+[![Watch the 23-second demo](docs/demo.jpg)](docs/demo.mp4)
+
+**[Watch the 23-second demo](docs/demo.mp4)**, which uses sample invoices only.
+
 ## 1. Quick start
 
 Prerequisites: Docker Desktop (Compose v2) and a free Gemini API key from
@@ -34,6 +38,14 @@ docker compose ps               # wait until all five services show (healthy)
 Mock ERP's API documentation is off, and its data routes need `ERP_SERVICE_TOKEN` in an `X-Service-Token` header.
 
 Invoices in `data/incoming/` are picked up automatically within ~20 seconds (a file must be unchanged across two scans).
+
+### Uploading invoices
+
+Sign in and click **Upload invoice** on the dashboard. PDF, Word (.docx), PNG, JPEG and TIFF files up to 25 MB are accepted.
+
+To turn uploads on, create a **private** Supabase Storage bucket named `invoices`, then copy the values under **Storage → S3 Configuration** into the `SUPABASE_S3_*` settings in `.env`. Without them, the button explains that uploads aren't set up.
+
+The API checks the login, the file's real type and its size, and refuses exact duplicates. It stores the file under a random name, and the agent audits a temporary copy. The original stays in the private bucket.
 
 ### Configuring `.env`
 
@@ -363,7 +375,7 @@ A working end-to-end project, run locally with Docker Compose. It uses sample in
 
 - A five-container stack: agent, mock ERP, frontend, Qdrant and Redis, with the database and login on Supabase.
 - A React frontend: sign in, invoice list with money held, vendor view and hover previews, review with click-to-correct figures and a decision queue, questions with sources, processing log, light and dark themes.
-- An invoice pipeline: monitor, extract, translate, validate, check against the ERP, report and index.
+- An invoice pipeline: upload or watched folder, extract, translate, validate, check against the ERP, report and index.
 - Question answering from fixed SQL queries and RAG, with answer scoring and retries.
 - A human review flow: corrections, re-validation and a permanent audit history. The system's recommendation and the reviewer's decision are kept separately.
 
@@ -372,6 +384,7 @@ A working end-to-end project, run locally with Docker Compose. It uses sample in
 - **Login:** every API route except a bare `/health` needs a Supabase login, and only accounts in `REVIEWER_EMAILS` are accepted. The reviewer recorded on each change comes from the verified token.
 - **Least privilege:** each service has its own database role and secrets. Nobody can delete from the audit trail, and browser API roles get no access to the data.
 - **Between services:** Mock ERP needs a service token, Qdrant an API key and Redis a password, and placeholder secrets stop startup. Database connections verify the server's certificate.
+- **Uploads:** a private Storage bucket, reached only through the signed-in API. Each file's real type is checked and it gets a random name.
 - **Untrusted files:** parsing runs in a separate process with no secrets, a memory limit and a deadline, and file size, page and pixel limits are enforced.
 - **AI output is never trusted alone:** recommendations come from fixed rules. An AI line match always needs a person to confirm it, and the model never writes SQL.
 - **Abuse limits:** per-reviewer rate limits on costly actions and a request size limit in the API.

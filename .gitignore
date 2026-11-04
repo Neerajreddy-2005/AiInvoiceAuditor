@@ -38,3 +38,6 @@ dist/
 
 # private working notes
 *.private.md
+
+# demo video working files
+brag-output*/

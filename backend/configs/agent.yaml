@@ -72,6 +72,7 @@ rate_limits:
   query: {calls: 5, per_seconds: 60}
   query_daily: {calls: 200, per_seconds: 86400}
   revalidate: {calls: 6, per_seconds: 60}
+  upload: {calls: 20, per_seconds: 60}
   feedback: {calls: 60, per_seconds: 60}
   retry: {calls: 10, per_seconds: 60}
   scan: {calls: 6, per_seconds: 60}

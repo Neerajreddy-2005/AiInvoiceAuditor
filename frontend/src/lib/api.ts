@@ -6,19 +6,30 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T>(path: string, body?: unknown): Promise<T> {
+export function api<T>(path: string, body?: unknown): Promise<T> {
+  return send<T>(path, {
+    method: body !== undefined ? "POST" : "GET",
+    headers: body !== undefined ? { "Content-Type": "application/json" } : {},
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+}
+
+export function uploadInvoice(file: File) {
+  return send<{ invoice_id: string }>("/invoices/upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream", "X-File-Name": encodeURIComponent(file.name) },
+    body: file,
+  });
+}
+
+async function send<T>(path: string, init: RequestInit & { headers: Record<string, string> }): Promise<T> {
   const { data } = await supabase.auth.getSession();
-  const headers: Record<string, string> = {};
+  const headers = { ...init.headers };
   if (data.session) headers.Authorization = `Bearer ${data.session.access_token}`;
-  if (body !== undefined) headers["Content-Type"] = "application/json";
 
   let response: Response;
   try {
-    response = await fetch(`/api${path}`, {
-      method: body !== undefined ? "POST" : "GET",
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
+    response = await fetch(`/api${path}`, { ...init, headers });
   } catch {
     throw new ApiError(0, "Can't reach the audit service. Check your connection and try again.");
   }

@@ -16,11 +16,14 @@ from contextlib import asynccontextmanager
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException
+from urllib.parse import unquote
+
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from . import cache, db, repository as repo, workflow
+from . import cache, db, repository as repo, uploads, workflow
 from .auth import current_reviewer
 from .erp_client import client as erp_client
 from .monitor_agent import monitor
@@ -83,6 +86,7 @@ async def lifespan(_: FastAPI):
 
 
 MAX_BODY_BYTES = 64 * 1024  # the same limit as nginx, for hosts where nginx isn't in front
+UPLOAD_PATH = "/invoices/upload"
 
 
 class _BodyTooLarge(Exception):
@@ -99,8 +103,12 @@ class EdgeGuards:
         if scope["type"] != "http":
             await self.inner(scope, receive, send)
             return
+        # Only the upload route takes more, and it checks the login before reading the body.
+        limit = MAX_BODY_BYTES
+        if scope["path"] == UPLOAD_PATH:
+            limit = agent_config()["extraction"]["limits"]["max_file_mb"] * 1024 * 1024
         length = dict(scope["headers"]).get(b"content-length", b"0")
-        if not length.isdigit() or int(length) > MAX_BODY_BYTES:
+        if not length.isdigit() or int(length) > limit:
             await JSONResponse(status_code=413, content={"detail": "Request is too large"})(scope, receive, send)
             return
         seen = 0
@@ -109,7 +117,7 @@ class EdgeGuards:
             nonlocal seen
             message = await receive()
             seen += len(message.get("body", b""))
-            if seen > MAX_BODY_BYTES:  # a chunked body declares no length
+            if seen > limit:  # a chunked body declares no length
                 raise _BodyTooLarge()
             return message
 
@@ -222,6 +230,22 @@ def run_report(invoice_id: UUID, run_id: int):
 
 
 # ---------------------------------------------------------------- processing
+
+@api.post(UPLOAD_PATH, status_code=201)
+async def upload_invoice(request: Request, x_file_name: str = Header(max_length=1000),
+                         reviewer: str = Depends(rate_limited("upload"))):
+    """The raw file is the request body: no multipart parser is exposed to untrusted input."""
+    data = await request.body()
+    try:
+        invoice_id = await run_in_threadpool(uploads.accept, unquote(x_file_name), data, reviewer)
+    except uploads.UploadRejected as exc:
+        raise HTTPException(exc.status, exc.message) from exc
+    except Exception as exc:
+        log.exception("Upload failed")
+        raise HTTPException(502, "The file couldn't be stored. Please try again.") from exc
+    monitor.trigger()
+    return {"invoice_id": invoice_id}
+
 
 @api.post("/process/scan", status_code=202, dependencies=[Depends(rate_limited("scan"))])
 def scan_now():

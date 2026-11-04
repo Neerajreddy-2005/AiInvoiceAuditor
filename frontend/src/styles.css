@@ -121,6 +121,8 @@ kbd { font: inherit; font-size: 0.75rem; padding: 0 5px; border: 1px solid var(-
 .page > section, .review-page > section { margin-top: 40px; }
 .filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 20px; }
 .search { flex: 1 1 280px; max-width: 460px; display: flex; align-items: center; gap: 10px; padding: 0 12px; background: var(--surface); border: 1px solid var(--muted); height: 44px; }
+.upload-message:empty { display: none; }
+.upload-message { flex-basis: 100%; order: 1; }
 .search:focus-within { outline: 3px solid var(--link); outline-offset: 2px; }
 .search input { flex: 1; min-width: 0; border: 0; background: none; outline: none; }
 input::placeholder { color: var(--muted); }

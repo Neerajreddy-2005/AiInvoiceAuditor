@@ -63,6 +63,14 @@ def claim_file(*, file_name: str, file_path: str, checksum: str, file_type: str 
     return row["invoice_id"] if row else None
 
 
+def pending_uploads(limit: int) -> list[dict]:
+    with db.connection() as conn:
+        return conn.execute(
+            "SELECT invoice_id::text, file_name, file_path, file_type, email_metadata FROM audit.invoice_audit "
+            "WHERE processing_status = 'detected' AND file_path LIKE %s ORDER BY detected_at LIMIT %s",
+            ("storage://%", limit)).fetchall()
+
+
 def mark_unsupported(invoice_id: str, reason: str) -> None:
     with db.connection() as conn:
         conn.execute("UPDATE audit.invoice_audit SET processing_status = 'unsupported', failed_stage = 'monitor', "

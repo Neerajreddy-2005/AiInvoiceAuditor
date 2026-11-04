@@ -14,6 +14,8 @@ os.environ.update({
 })
 
 import copy
+import hashlib
+import io
 import json
 import tempfile
 import time
@@ -27,7 +29,7 @@ import jwt
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 
-from app import auth, extraction, llm, main, monitor_agent, parsing, translate, validation, workflow
+from app import auth, extraction, llm, main, monitor_agent, parsing, translate, uploads, validation, workflow
 from app.rag.augmentation import build_context
 from app.settings import Settings, rules
 
@@ -284,6 +286,124 @@ class Api(unittest.TestCase):
                 response = self.client.get("/health")
         self.assertEqual(response.json(), {"status": "degraded"})
         self.assertEqual(probe.call_count, 1)
+
+
+class Uploads(unittest.TestCase):
+    PDF = b"%PDF-1.7 test"
+    PATH = "/invoices/upload"
+
+    def setUp(self):
+        self.client = TestClient(main.app, raise_server_exceptions=False)
+        main.app.dependency_overrides[auth.current_reviewer] = lambda: "reviewer@example.com"
+        self.addCleanup(main.app.dependency_overrides.clear)
+        main._recent_calls.clear()
+        configured = mock.patch.object(uploads.storage, "configured", return_value=True)
+        configured.start()
+        self.addCleanup(configured.stop)
+
+    def post(self, name="a.pdf", data=PDF):
+        return self.client.post(self.PATH, content=data, headers={"X-File-Name": name})
+
+    def test_valid_file_is_stored_under_a_random_name_and_queued(self):
+        with mock.patch.object(uploads.repo, "get_by_checksum", return_value=None), \
+                mock.patch.object(uploads.storage, "put") as put, \
+                mock.patch.object(uploads.repo, "claim_file", return_value="id-1") as claim, \
+                mock.patch.object(main.monitor, "trigger") as trigger:
+            response = self.post("..%2F..%2Fetc%2Fpasswd.pdf")
+        self.assertEqual((response.status_code, response.json()), (201, {"invoice_id": "id-1"}))
+        key = put.call_args.args[0]
+        self.assertRegex(key, r"^[0-9a-f]{32}\.pdf$")
+        self.assertEqual(claim.call_args.kwargs["file_name"], "passwd.pdf")
+        self.assertEqual(claim.call_args.kwargs["file_path"], f"storage://{key}")
+        self.assertEqual(claim.call_args.kwargs["email_metadata"], {"uploaded_by": "reviewer@example.com"})
+        trigger.assert_called_once()
+
+    def test_login_is_checked_before_a_large_body_is_read(self):
+        main.app.dependency_overrides.clear()
+        with mock.patch.object(uploads, "accept") as accept:
+            response = self.post(data=b"x" * (2 * main.MAX_BODY_BYTES))
+        self.assertEqual(response.status_code, 401)
+        accept.assert_not_called()
+
+    def test_only_the_upload_route_takes_a_large_body(self):
+        big = b"x" * (2 * main.MAX_BODY_BYTES)
+        self.assertEqual(self.client.post("/query", content=big).status_code, 413)
+        with mock.patch.object(uploads, "accept", return_value="id-1"), mock.patch.object(main.monitor, "trigger"):
+            self.assertEqual(self.post(data=big).status_code, 201)
+        over = b"x" * (25 * 1024 * 1024 + 1)
+        self.assertEqual(self.post(data=over).status_code, 413)
+
+    def test_file_content_must_match_its_extension(self):
+        with mock.patch.object(uploads.storage, "put") as put:
+            for name, data in (("a.pdf", b"MZ not a pdf"), ("a.png", self.PDF), ("a.jpg", self.PDF),
+                               ("a.docx", b"PK not a zip"), ("a.exe", self.PDF), ("noextension", self.PDF), ("a.pdf", b"")):
+                self.assertEqual(self.post(name, data).status_code, 422, name)
+        put.assert_not_called()
+
+    def test_docx_must_really_be_a_word_document(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as package:
+            package.writestr("evil.txt", b"x")
+        self.assertFalse(uploads.content_matches(".docx", buffer.getvalue()))
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as package:
+            package.writestr("word/document.xml", b"x")
+        self.assertTrue(uploads.content_matches(".docx", buffer.getvalue()))
+
+    def test_exact_duplicate_is_refused_without_storing_it(self):
+        with mock.patch.object(uploads.repo, "get_by_checksum", return_value={"file_name": "old.pdf"}), \
+                mock.patch.object(uploads.storage, "put") as put:
+            response = self.post()
+        self.assertEqual(response.status_code, 409)
+        put.assert_not_called()
+
+    def test_without_storage_settings_the_button_gets_a_clear_answer(self):
+        with mock.patch.object(uploads.storage, "configured", return_value=False):
+            self.assertEqual(self.post().status_code, 503)
+
+    def test_storage_failure_stays_generic_and_records_nothing(self):
+        with mock.patch.object(uploads.repo, "get_by_checksum", return_value=None), \
+                mock.patch.object(uploads.storage, "put", side_effect=RuntimeError("secret detail")), \
+                mock.patch.object(uploads.repo, "claim_file") as claim:
+            response = self.post()
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn("secret detail", response.text)
+        claim.assert_not_called()
+
+    def test_control_characters_and_long_names_are_cleaned(self):
+        self.assertEqual(uploads.clean_name("C:\\x\\in\x00vo\nice.pdf"), "invoice.pdf")
+        long_name = uploads.clean_name("a" * 500 + ".pdf")
+        self.assertEqual(len(long_name), uploads.MAX_NAME_CHARS)
+        self.assertTrue(long_name.endswith(".pdf"))
+
+    def test_monitor_processes_pending_uploads(self):
+        row = {"invoice_id": "id-1", "file_name": "a.pdf", "file_path": "storage://k.pdf", "file_type": "pdf",
+               "email_metadata": None}
+        monitor = monitor_agent.InvoiceMonitor()
+        with mock.patch.object(monitor_agent.repo, "pending_uploads", return_value=[row]), \
+                mock.patch.object(monitor_agent.workflow, "run_new") as run:
+            monitor.process_uploads()
+        self.assertEqual(run.call_args.kwargs["file_path"], "storage://k.pdf")
+
+    def test_uploaded_file_is_downloaded_checked_and_removed(self):
+        seen = {}
+
+        def fake_download(_, path):
+            path.write_bytes(self.PDF)
+            seen["path"] = path
+
+        result = mock.Mock(text="Total 1", method="pdfplumber", pages=1, ocr_pages=0)
+        state = {"invoice_id": "id-1", "file_path": "storage://k.pdf"}
+        checksum = hashlib.sha256(self.PDF).hexdigest()
+        with mock.patch.object(workflow.storage, "download", side_effect=fake_download), \
+                mock.patch.object(workflow.repo, "get_invoice", return_value={"file_checksum": checksum}), \
+                mock.patch.object(workflow, "extract", return_value=result), \
+                mock.patch.object(workflow.repo, "save_extraction"):
+            workflow._extract(state, "pdf")
+            self.assertFalse(seen["path"].exists())
+            with mock.patch.object(workflow.repo, "get_invoice", return_value={"file_checksum": "different"}), \
+                    self.assertRaisesRegex(ValueError, "changed after"):
+                workflow._extract(state, "pdf")
 
 
 class Abuse(unittest.TestCase):

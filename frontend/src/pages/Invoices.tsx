@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CountUp } from "../components/CountUp";
+import { UploadButton } from "../components/UploadButton";
 import { VendorPicker } from "../components/VendorPicker";
 import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
@@ -156,6 +157,7 @@ export function Invoices() {
             <input ref={searchBox} type="search" placeholder="Search number, vendor or file  ( / )" value={search} onChange={(e) => setSearch(e.target.value)} />
           </label>
           <VendorPicker vendors={summary.vendorRows} value={vendor} onChange={setVendor} />
+          <UploadButton />
           {filtered && <button className="button quiet" onClick={() => { setVerdict(null); setVendor(""); setSearch(""); }}>Clear filters</button>}
           <span className="muted small push">{shown.length} of {rows?.length ?? 0} · <kbd>J</kbd> <kbd>K</kbd> to move, <kbd>Enter</kbd> to open</span>
         </div>
@@ -170,7 +172,7 @@ export function Invoices() {
         {rows?.length === 0 && (
           <div className="empty">
             <h2>Waiting for the first invoice</h2>
-            <p>Add PDF, DOCX or PNG files to the incoming folder. They're picked up within seconds and appear here as they're checked.</p>
+            <p>Upload a PDF, Word or image file. It appears here as it's checked.</p>
           </div>
         )}
         {rows && rows.length > 0 && shown.length === 0 && (

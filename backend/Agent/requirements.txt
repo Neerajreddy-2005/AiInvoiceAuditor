@@ -21,6 +21,7 @@ pillow==13.0.0
 langdetect==1.0.9
 
 # Stores
+boto3==1.43.123
 psycopg[binary]==3.3.8
 psycopg-pool==3.3.3
 qdrant-client==1.15.1

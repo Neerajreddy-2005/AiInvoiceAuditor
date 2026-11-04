@@ -47,6 +47,12 @@ class Settings:
         self.qdrant_api_key = _require_secret("QDRANT_API_KEY")
         self.redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
+        self.storage_endpoint = os.getenv("SUPABASE_S3_ENDPOINT") or None
+        self.storage_region = os.getenv("SUPABASE_S3_REGION") or None
+        self.storage_access_key = os.getenv("SUPABASE_S3_ACCESS_KEY_ID") or None
+        self.storage_secret_key = os.getenv("SUPABASE_S3_SECRET_ACCESS_KEY") or None
+        self.storage_bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "invoices")
+
         self.incoming_dir = Path(os.getenv("INCOMING_DIR", "/data/incoming"))
         self.reports_dir = Path(os.getenv("REPORTS_DIR", "/data/reports"))
         self.log_level = os.getenv("LOG_LEVEL", "INFO")

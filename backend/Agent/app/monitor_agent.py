@@ -59,7 +59,7 @@ class InvoiceMonitor:
         log.info("Monitoring %s every %ss", settings().incoming_dir, interval)
         while not self._stop.is_set():
             errors = []
-            for step in (self.scan_once, self.retry_failed, self.index_sweep):
+            for step in (self.process_uploads, self.scan_once, self.retry_failed, self.index_sweep):
                 try:
                     step()
                 except Exception as exc:  # keep the monitor alive; surface the error in /health
@@ -162,6 +162,17 @@ class InvoiceMonitor:
         except workflow.WorkflowError as exc:
             log.error("%s: %s", path.name, exc)
             return 0
+
+    def process_uploads(self) -> None:
+        """Runs here rather than in the request, so uploads share the one-at-a-time limit on Gemini use."""
+        for row in repo.pending_uploads(agent_config()["monitor"]["max_new_files_per_scan"]):
+            log.info("New upload %s -> %s", row["file_name"], row["invoice_id"])
+            try:
+                workflow.run_new(invoice_id=row["invoice_id"], file_name=row["file_name"],
+                                 file_path=row["file_path"], file_type=row["file_type"],
+                                 email_metadata=row["email_metadata"])
+            except workflow.WorkflowError as exc:
+                log.error("%s: %s", row["file_name"], exc)
 
     def retry_failed(self) -> None:
         cfg = agent_config()["monitor"]

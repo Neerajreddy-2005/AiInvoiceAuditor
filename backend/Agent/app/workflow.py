@@ -14,8 +14,10 @@ State holds only JSON-safe values (amounts as strings, dates as ISO).
 """
 import logging
 import re
+import tempfile
 import threading
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TypedDict
 
@@ -25,6 +27,7 @@ from langgraph.graph import END, START, StateGraph
 from . import db, llm
 from . import report as reporting
 from . import repository as repo
+from . import storage
 from .erp_client import client as erp_client
 from .extraction import extract, file_sha256
 from .parsing import parse_invoice, parse_number
@@ -78,12 +81,26 @@ def route_entry(state: InvoiceState) -> str:
     return {"pdf": "extract_pdf", "docx": "extract_docx", "image": "extract_image"}[state["file_type"]]
 
 
+@contextmanager
+def _local_file(file_path: str):
+    """A file in the watched folder as it is, or an uploaded one as a temporary copy."""
+    if not file_path.startswith(storage.SCHEME):
+        yield Path(file_path)
+        return
+    key = file_path.removeprefix(storage.SCHEME)
+    with tempfile.TemporaryDirectory() as folder:
+        local = Path(folder) / f"upload{Path(key).suffix}"
+        storage.download(key, local)
+        yield local
+
+
 def _extract(state: InvoiceState, kind: str) -> dict:
     # The audit trail records one checksum, so it must describe the content audited here.
     claimed = repo.get_invoice(state["invoice_id"])["file_checksum"]
-    if file_sha256(Path(state["file_path"])) != claimed:
-        raise ValueError("The file changed after it was detected")
-    result = extract(Path(state["file_path"]), kind)
+    with _local_file(state["file_path"]) as local:
+        if file_sha256(local) != claimed:
+            raise ValueError("The file changed after it was detected")
+        result = extract(local, kind)
     parsed = parse_invoice(result.text, rules().get("currency_symbol_map"))
     extras = {**parsed["extras"], "extraction": {"pages": result.pages, "ocr_pages": result.ocr_pages}}
     repo.save_extraction(state["invoice_id"], method=result.method, raw_text=result.text,
