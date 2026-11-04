@@ -18,8 +18,8 @@ survive the containers being destroyed and recreated.
 ## 1. Quick start
 
 Prerequisites: Docker Desktop (Compose v2) and a free Gemini API key from
-[Google AI Studio](https://aistudio.google.com/apikey). The free tier has rate limits, and Google
-may use free-tier data to improve its products, so check its terms before using real invoices.
+[Google AI Studio](https://aistudio.google.com/apikey). The free tier has rate limits. Google may
+use free-tier data to improve its products, and people may read it, so use sample invoices only.
 
 ```bash
 # First create a Supabase project, turn off public sign-ups, add a user, and run

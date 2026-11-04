@@ -345,6 +345,81 @@ class Api(unittest.TestCase):
         self.assertEqual(probe.call_count, 1)
 
 
+class DailyGeminiLimit(unittest.TestCase):
+    class FakeRedis:
+        def __init__(self):
+            self.counts = {}
+
+        def incr(self, key):
+            self.counts[key] = self.counts.get(key, 0) + 1
+            return self.counts[key]
+
+        def expire(self, *_):
+            pass
+
+        def get(self, _):
+            return None
+
+        def set(self, *_, **__):
+            pass
+
+    def setUp(self):
+        patcher = mock.patch.object(llm.cache, "_client", self.FakeRedis())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        limited = copy.deepcopy(llm.agent_config())
+        limited["llm"]["max_calls_per_day"] = 2
+        for module in (llm,):
+            config = mock.patch.object(module, "agent_config", return_value=limited)
+            config.start()
+            self.addCleanup(config.stop)
+
+    def reply(self):
+        return mock.Mock(choices=[mock.Mock(message=mock.Mock(content="ok"))])
+
+    def test_calls_stop_at_the_limit_and_the_model_is_not_called(self):
+        messages = [{"role": "user", "content": "x"}]
+        with mock.patch.object(llm.litellm, "completion", return_value=self.reply()) as call:
+            llm.complete(messages)
+            llm.complete(messages)
+            with self.assertRaises(llm.DailyLimitReached):
+                llm.complete(messages)
+        self.assertEqual(call.call_count, 2)
+
+    def test_embeddings_share_the_same_limit(self):
+        vector = mock.Mock(data=[{"embedding": [0.1]}])
+        with mock.patch.object(llm.litellm, "completion", return_value=self.reply()), \
+                mock.patch.object(llm.litellm, "embedding", return_value=vector) as embed:
+            llm.complete([{"role": "user", "content": "x"}])
+            llm.embed("a")
+            with self.assertRaises(llm.DailyLimitReached):
+                llm.embed("b")
+        self.assertEqual(embed.call_count, 1)
+
+    def test_it_is_an_llm_error_so_optional_steps_can_be_skipped(self):
+        self.assertTrue(issubclass(llm.DailyLimitReached, llm.LLMError))
+
+    def test_a_redis_failure_does_not_stop_the_model(self):
+        broken = mock.Mock()
+        broken.incr.side_effect = llm.cache.redis.RedisError("down")
+        broken.get.return_value = None
+        with mock.patch.object(llm.cache, "_client", broken), \
+                mock.patch.object(llm.litellm, "completion", return_value=self.reply()) as call:
+            llm.complete([{"role": "user", "content": "x"}])
+        self.assertEqual(call.call_count, 1)
+
+    def test_the_question_page_gets_a_clear_message(self):
+        client = TestClient(main.app, raise_server_exceptions=False)
+        main.app.dependency_overrides[auth.current_reviewer] = lambda: "reviewer@example.com"
+        self.addCleanup(main.app.dependency_overrides.clear)
+        main._recent_calls.clear()
+        with mock.patch.object(main, "answer_query", side_effect=llm.DailyLimitReached("limit")):
+            job_id = client.post("/query", json={"question": "hello"}).json()["job_id"]
+        job = client.get(f"/jobs/{job_id}").json()
+        self.assertEqual(job["code"], 429)
+        self.assertIn("daily limit", job["detail"])
+
+
 class Overcharges(unittest.TestCase):
     def outcome(self, price, quantity="100", currency="USD"):
         net = Decimal(price) * Decimal(quantity)

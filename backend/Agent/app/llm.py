@@ -25,6 +25,10 @@ class LLMError(RuntimeError):
     pass
 
 
+class DailyLimitReached(LLMError):
+    pass
+
+
 def render(template: str, **values) -> str:
     """One pass over the template: a {{placeholder}} inside invoice text is never expanded."""
     def fill(match: re.Match) -> str:
@@ -65,6 +69,14 @@ def truncate(text: str) -> str:
     return text if len(text) <= limit else text[:limit] + "\n[...truncated...]"
 
 
+def _count_call() -> None:
+    """A project-wide daily cap, on top of the per-reviewer limits, so nothing can use up the free quota."""
+    limit = agent_config()["llm"]["max_calls_per_day"]
+    count = cache.count_today("gemini_calls")
+    if count is not None and count > limit:
+        raise DailyLimitReached(f"The daily limit of {limit} Gemini calls has been reached")
+
+
 def complete(messages: list[dict], *, temperature: float = 0.0, max_tokens: int = 1500,
              use_cache: bool = True) -> str:
     cfg = agent_config()
@@ -74,6 +86,7 @@ def complete(messages: list[dict], *, temperature: float = 0.0, max_tokens: int 
         hit = cache.get_json(key)
         if hit is not None:
             return hit["content"]
+    _count_call()
     try:
         response = litellm.completion(
             model=model, messages=messages, temperature=temperature, max_tokens=max_tokens,
@@ -121,6 +134,7 @@ def embed(text: str) -> list[float]:
     hit = cache.get_json(key)
     if hit is not None:
         return hit
+    _count_call()
     try:
         response = litellm.embedding(model=model, input=[text],
                                      timeout=cfg["llm"]["timeout_seconds"])

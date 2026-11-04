@@ -58,6 +58,9 @@ llm:
   timeout_seconds: 60
   num_retries: 2
   max_input_chars: 12000
+  # Across the whole project, per UTC day. Cached answers don't count. Held in
+  # Redis, so a Redis restart resets it.
+  max_calls_per_day: 1000
 
 cache:
   # Redis is disposable: flushing it only makes the system slower.

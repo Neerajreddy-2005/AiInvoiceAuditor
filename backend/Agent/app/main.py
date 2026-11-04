@@ -23,7 +23,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from . import cache, db, repository as repo, uploads, workflow
+from . import cache, db, llm, repository as repo, uploads, workflow
 from .auth import current_reviewer
 from .erp_client import client as erp_client
 from .monitor_agent import monitor
@@ -434,6 +434,8 @@ def query(body: QueryIn, background: BackgroundTasks, reviewer: str = Depends(ra
     def _work():
         try:
             return answer_query(body.question, str(body.invoice_id) if body.invoice_id else None)
+        except llm.DailyLimitReached as exc:
+            raise HTTPException(429, "The AI's daily limit has been reached. Please try again tomorrow.") from exc
         except Exception as exc:
             log.exception("Query failed")
             raise HTTPException(502, "Could not answer the question. Please try again.") from exc

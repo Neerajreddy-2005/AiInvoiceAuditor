@@ -13,7 +13,8 @@ name: invoice-auditor
 services:
   # ------------------------------------------------------------------ data
   qdrant:
-    image: qdrant/qdrant:v1.15.5
+    # Upgrade one minor version at a time: Qdrant doesn't support skipping any, or going back.
+    image: qdrant/qdrant:v1.20.0
     environment:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?Set QDRANT_API_KEY in .env}
       QDRANT__SERVICE__ENABLE_CORS: "false"
@@ -32,7 +33,7 @@ services:
     networks: [invoice-net]
 
   redis:
-    image: redis:7.4.6
+    image: redis:7.4.12
     # Disposable cache: no persistence, bounded memory, LRU eviction.
     command: ["redis-server", "--save", "", "--appendonly", "no",
               "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru",

@@ -7,6 +7,7 @@ briefly unavailable, lookups miss and the system only gets slower.
 import hashlib
 import json
 import logging
+from datetime import datetime, timezone
 
 import redis
 
@@ -53,6 +54,20 @@ def set_json(key: str, value, ttl_seconds: int) -> None:
         _client.set(key, json.dumps(value, ensure_ascii=False, default=str), ex=ttl_seconds)
     except redis.RedisError as exc:
         log.warning("Cache write failed (%s); continuing without cache", exc)
+
+
+def count_today(name: str) -> int | None:
+    """Adds one to today's (UTC) counter and returns it, or None if Redis can't say."""
+    if _client is None:
+        return None
+    key = f"count:{name}:{datetime.now(timezone.utc).date().isoformat()}"
+    try:
+        count = _client.incr(key)
+        _client.expire(key, 2 * 86400)
+        return count
+    except redis.RedisError as exc:
+        log.warning("Counter update failed (%s); continuing without it", exc)
+        return None
 
 
 def delete(key: str) -> None:
