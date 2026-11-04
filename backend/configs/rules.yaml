@@ -48,6 +48,7 @@ data_types:
 tolerances:
   # Business tolerances: invoice vs ERP purchase order
   price_difference_percent: 5       # ±5% tolerance in unit price
+  overcharge_reject_percent: 50     # Over this above the PO's price or value: recommend reject, not review
   quantity_difference_percent: 0    # Quantity must match exactly
   # Local invoice-data checks (the invoice's own arithmetic, not ERP).
   # These are rounding-level tolerances that absorb cents-level rounding,
@@ -98,6 +99,7 @@ validation_policies:
   vendor_mismatch_action: manual_review     # invoice vendor differs from the PO's vendor
   currency_mismatch_action: manual_review   # invoice currency differs from PO currency
   price_mismatch_action: manual_review      # unit price outside price tolerance
+  overcharge_action: reject                 # price or value above overcharge_reject_percent; a reviewer can still overrule it
   quantity_mismatch_action: manual_review   # quantity outside quantity tolerance
   unknown_sku_action: manual_review         # item code not in the SKU master
   unmatched_line_action: manual_review      # invoice line not found on the PO

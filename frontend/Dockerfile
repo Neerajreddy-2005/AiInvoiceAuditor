@@ -12,6 +12,10 @@ ENV SUPABASE_URL=$SUPABASE_URL SUPABASE_PUBLISHABLE_KEY=$SUPABASE_PUBLISHABLE_KE
 RUN npm run build
 
 FROM nginxinc/nginx-unprivileged:1.29.3-alpine
+# Security fixes newer than the base image, then back to its unprivileged user.
+USER root
+RUN apk upgrade --no-cache
+USER 101
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 8080

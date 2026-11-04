@@ -14,7 +14,7 @@ import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from typing import Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from urllib.parse import unquote
 
@@ -160,6 +160,51 @@ def rate_limited(action: str):
         return reviewer
 
     return check
+
+
+# ---------------------------------------------------------------- slow requests
+
+JOB_KEEP_SECONDS = 600
+_jobs: dict[str, dict] = {}
+_jobs_lock = threading.Lock()
+
+
+def _start_job(background: BackgroundTasks, reviewer: str, work) -> dict:
+    """Runs work after replying, and the browser polls /jobs for the result.
+
+    Gemini calls can take a minute, and hosted proxies end a request sooner than
+    that (Netlify at about 26 seconds). One agent process, so memory is enough.
+    """
+    job_id = uuid4().hex
+    now = time.monotonic()
+    with _jobs_lock:
+        for old in [key for key, job in _jobs.items() if now - job["started"] > JOB_KEEP_SECONDS]:
+            del _jobs[old]
+        _jobs[job_id] = {"reviewer": reviewer, "started": now, "status": "running"}
+
+    def _run():
+        try:
+            outcome = {"status": "done", "result": work()}
+        except HTTPException as exc:
+            outcome = {"status": "failed", "code": exc.status_code, "detail": exc.detail}
+        except Exception:
+            log.exception("Background request failed")
+            outcome = {"status": "failed", "code": 502, "detail": "That request could not finish. Please try again."}
+        with _jobs_lock:
+            if job_id in _jobs:
+                _jobs[job_id].update(outcome)
+
+    background.add_task(_run)
+    return {"job_id": job_id}
+
+
+@api.get("/jobs/{job_id}")
+def job_status(job_id: UUID, reviewer: str = Depends(current_reviewer)):
+    with _jobs_lock:
+        job = _jobs.get(job_id.hex)
+        if job is None or job["reviewer"] != reviewer:
+            raise HTTPException(404, "That request has expired")
+        return {key: value for key, value in job.items() if key not in ("reviewer", "started")}
 
 
 # ---------------------------------------------------------------- health
@@ -362,16 +407,19 @@ def add_feedback(invoice_id: UUID, body: FeedbackIn, reviewer: str = Depends(rat
     return {"id": feedback_id}
 
 
-@api.post("/invoices/{invoice_id}/revalidate")
-def revalidate(invoice_id: UUID, reviewer: str = Depends(rate_limited("revalidate"))):
-    try:
-        return workflow.revalidate(str(invoice_id), reviewer)
-    except LookupError as exc:
-        raise HTTPException(404, "Invoice not found") from exc
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    except workflow.WorkflowError as exc:
-        raise HTTPException(502, "The re-check could not finish. Please try again.") from exc
+@api.post("/invoices/{invoice_id}/revalidate", status_code=202)
+def revalidate(invoice_id: UUID, background: BackgroundTasks, reviewer: str = Depends(rate_limited("revalidate"))):
+    def _work():
+        try:
+            return workflow.revalidate(str(invoice_id), reviewer)
+        except LookupError as exc:
+            raise HTTPException(404, "Invoice not found") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except workflow.WorkflowError as exc:
+            raise HTTPException(502, "The re-check could not finish. Please try again.") from exc
+
+    return _start_job(background, reviewer, _work)
 
 
 # ---------------------------------------------------------------- questions
@@ -381,13 +429,16 @@ class QueryIn(BaseModel):
     invoice_id: UUID | None = None
 
 
-@api.post("/query", dependencies=[Depends(rate_limited("query")), Depends(rate_limited("query_daily"))])
-def query(body: QueryIn):
-    try:
-        return answer_query(body.question, str(body.invoice_id) if body.invoice_id else None)
-    except Exception as exc:
-        log.exception("Query failed")
-        raise HTTPException(502, "Could not answer the question. Please try again.") from exc
+@api.post("/query", status_code=202, dependencies=[Depends(rate_limited("query_daily"))])
+def query(body: QueryIn, background: BackgroundTasks, reviewer: str = Depends(rate_limited("query"))):
+    def _work():
+        try:
+            return answer_query(body.question, str(body.invoice_id) if body.invoice_id else None)
+        except Exception as exc:
+            log.exception("Query failed")
+            raise HTTPException(502, "Could not answer the question. Please try again.") from exc
+
+    return _start_job(background, reviewer, _work)
 
 
 _reindex_running = threading.Lock()

@@ -14,6 +14,23 @@ export function api<T>(path: string, body?: unknown): Promise<T> {
   });
 }
 
+type Job<T> = { status: "running" } | { status: "done"; result: T } | { status: "failed"; code: number; detail: string };
+
+const POLL_MS = 1000;
+const POLL_ATTEMPTS = 300;
+
+/** For work that can outlast a hosted proxy's time limit: the API replies at once, then this checks for the result. */
+export async function slowApi<T>(path: string, body: unknown): Promise<T> {
+  const { job_id } = await api<{ job_id: string }>(path, body);
+  for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+    const job = await api<Job<T>>(`/jobs/${job_id}`);
+    if (job.status === "done") return job.result;
+    if (job.status === "failed") throw new ApiError(job.code, job.detail);
+  }
+  throw new ApiError(0, "That is taking too long. Please try again.");
+}
+
 export function uploadInvoice(file: File) {
   return send<{ invoice_id: string }>("/invoices/upload", {
     method: "POST",

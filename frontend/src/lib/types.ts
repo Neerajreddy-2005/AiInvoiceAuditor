@@ -89,8 +89,11 @@ export interface InvoiceDetail {
 export interface Source {
   ref: number;
   source_type: string;
+  invoice_id?: string;
   invoice_number: string | null;
   vendor: string | null;
+  po_number?: string | null;
+  file_name?: string | null;
   excerpt: string;
 }
 
@@ -101,4 +104,6 @@ export interface Answer {
   scores?: Record<string, number>;
   attempts?: { attempt: number; query: string; scores: { average: number } }[];
   sources?: Source[];
+  rows?: Record<string, string | number | null>[];
+  notes?: string[];
 }

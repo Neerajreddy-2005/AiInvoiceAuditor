@@ -8,10 +8,13 @@ Image: Tesseract with light preprocessing.
 The full text is returned so it can be stored in PostgreSQL; OCR is
 expensive and is never repeated for the same file.
 """
+import ctypes
+import errno
 import hashlib
 import json
 import logging
 import os
+import platform
 import resource
 import signal
 import subprocess
@@ -149,11 +152,55 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _extract_in_child(path: Path, file_type: str) -> ExtractionResult:
-    """Parse untrusted files in a separate process with no secrets in its environment.
+class _BpfInstruction(ctypes.Structure):
+    _fields_ = [("code", ctypes.c_uint16), ("jt", ctypes.c_uint8), ("jf", ctypes.c_uint8), ("k", ctypes.c_uint32)]
 
-    A parser flaw then can't read credentials, and a slow or memory-hungry file
-    stops only this process, not the API.
+
+class _BpfProgram(ctypes.Structure):
+    _fields_ = [("len", ctypes.c_uint16), ("filter", ctypes.POINTER(_BpfInstruction))]
+
+
+def _network_block():
+    """A seccomp filter for a parser: no new sockets, for it or anything it starts.
+
+    Built before the fork, so the child only has to switch it on. An unknown machine
+    raises here, so parsing fails rather than running unfiltered.
+    """
+    audit_arch, socket_call = {"x86_64": (0xC000003E, 41), "aarch64": (0xC00000B7, 198)}[platform.machine()]
+    load, jump_equal, jump_at_least, stop = 0x20, 0x15, 0x35, 0x06
+    kill, allow, refuse = 0x80000000, 0x7FFF0000, 0x00050000 | errno.EPERM
+    x32_calls, io_uring_setup = 0x40000000, 425  # both are other ways to open a socket
+    instructions = (_BpfInstruction * 9)(
+        (load, 0, 0, 4), (jump_equal, 1, 0, audit_arch), (stop, 0, 0, kill),  # any other instruction set is refused
+        (load, 0, 0, 0), (jump_at_least, 3, 0, x32_calls), (jump_equal, 2, 0, socket_call),
+        (jump_equal, 1, 0, io_uring_setup), (stop, 0, 0, allow), (stop, 0, 0, refuse))
+    program = _BpfProgram(len(instructions), instructions)
+    libc = ctypes.CDLL(None, use_errno=True)
+    PR_SET_SECCOMP, SECCOMP_MODE_FILTER, PR_SET_NO_NEW_PRIVS = 22, 2, 38
+
+    def switch_on() -> None:
+        if libc.prctl(PR_SET_NO_NEW_PRIVS, ctypes.c_ulong(1), ctypes.c_ulong(0), ctypes.c_ulong(0), ctypes.c_ulong(0)) \
+                or libc.prctl(PR_SET_SECCOMP, ctypes.c_ulong(SECCOMP_MODE_FILTER), ctypes.byref(program)):
+            raise OSError(ctypes.get_errno(), "Could not block the parser's network access")
+
+    return switch_on
+
+
+def _parser_limits(memory: int):
+    block_network = _network_block()
+
+    def apply() -> None:
+        resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
+        block_network()
+
+    return apply
+
+
+def _extract_in_child(path: Path, file_type: str) -> ExtractionResult:
+    """Parse untrusted files in a separate process with no secrets and no new network connections.
+
+    A parser flaw then can't read credentials or send data out, and a slow or
+    memory-hungry file stops only this process, not the API.
     """
     limits = _limits()
     memory = limits["max_parser_memory_mb"] * 1024 * 1024
@@ -161,7 +208,7 @@ def _extract_in_child(path: Path, file_type: str) -> ExtractionResult:
     child = subprocess.Popen(
         [sys.executable, "-m", "app.extraction", str(path), file_type],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, start_new_session=True,
-        preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_AS, (memory, memory)))
+        preexec_fn=_parser_limits(memory))
     try:
         out, err = child.communicate(timeout=limits["max_document_seconds"])
     except subprocess.TimeoutExpired:

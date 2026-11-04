@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronLeft, ChevronRight, Download, Flag, Pencil, RotateCw, X } from "lucide-react";
 import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api } from "../lib/api";
+import { api, slowApi } from "../lib/api";
 import { dateTime, fieldLabel, LANGUAGES, money, plain, STATUS_LABEL, VERDICT_HELP, VERDICT_LABEL } from "../lib/format";
 import type { Discrepancy, Feedback, Invoice, InvoiceDetail, Verdict } from "../lib/types";
 import { useInvoices } from "./Invoices";
@@ -216,7 +216,7 @@ export default function Review({ reviewer }: { reviewer: string }) {
   useEffect(() => { scrollTo(0, 0); setHighlight(null); }, [id]);
 
   const revalidate = useMutation({
-    mutationFn: () => api<{ run_number: number; recommendation: Verdict }>(`/invoices/${id}/revalidate`, {}),
+    mutationFn: () => slowApi<{ run_number: number; recommendation: Verdict }>(`/invoices/${id}/revalidate`, {}),
     onSuccess: () => {
       queries.invalidateQueries({ queryKey: ["invoice", id] });
       queries.invalidateQueries({ queryKey: ["invoices"] });
@@ -305,11 +305,19 @@ export default function Review({ reviewer }: { reviewer: string }) {
 
       {!completed ? <Pipeline invoice={inv} id={id} /> : (
         <section className="page review-page">
-          {derived.pending > 0 && (
+          {derived.pending > 0 ? (
             <div className="pending" role="status">
               <p><strong>{derived.pending} correction{derived.pending === 1 ? "" : "s"} not re-checked yet.</strong> The recommendation above doesn't include {derived.pending === 1 ? "it" : "them"}.</p>
               <button className="button primary" disabled={revalidate.isPending} onClick={() => revalidate.mutate()}>
                 <RotateCw size={16} aria-hidden="true" className={revalidate.isPending ? "spin" : ""} /> {revalidate.isPending ? "Re-checking against the ERP…" : "Re-check now"}
+              </button>
+            </div>
+          ) : (
+            // Rules and the ERP change too, so a re-check is useful even with no corrections waiting.
+            <div className="recheck">
+              <p className="muted small">Checks this invoice again with the current rules and ERP data.{derived.decision ? " This reopens your decision." : ""}</p>
+              <button className="button" disabled={revalidate.isPending} onClick={() => revalidate.mutate()}>
+                <RotateCw size={16} aria-hidden="true" className={revalidate.isPending ? "spin" : ""} /> {revalidate.isPending ? "Re-checking against the ERP…" : "Re-check"}
               </button>
             </div>
           )}

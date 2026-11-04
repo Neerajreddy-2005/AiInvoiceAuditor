@@ -12,8 +12,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # 1) System packages (change rarely). Tesseract with the dataset's languages
 #    (English, German, Spanish) and Poppler for rendering scanned PDF pages.
+#    Upgrading picks up security fixes newer than the base image, which matters
+#    here because these libraries read untrusted files.
 #    The apt cache is removed in the same layer that creates it.
 RUN apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends \
       tesseract-ocr tesseract-ocr-eng tesseract-ocr-deu tesseract-ocr-spa \
       poppler-utils \

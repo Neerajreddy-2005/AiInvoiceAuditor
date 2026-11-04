@@ -17,11 +17,14 @@ import copy
 import hashlib
 import io
 import json
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
 import zipfile
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
@@ -29,7 +32,8 @@ import jwt
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 
-from app import auth, extraction, llm, main, monitor_agent, parsing, translate, uploads, validation, workflow
+from app import auth, extraction, llm, main, monitor_agent, parsing, report, translate, uploads, validation, workflow
+from app.rag import graph
 from app.rag.augmentation import build_context
 from app.settings import Settings, rules
 
@@ -131,8 +135,9 @@ class BusinessRules(unittest.TestCase):
         # Line price +5% is within tolerance, but the header claims more than even that allows.
         found = validation._check_against_po_value(
             {"subtotal_amount": "10600", "total_amount": "12508", "tax_rate_pct": "18"}, [self.LINE],
-            [{"po_line": PO["line_items"][0]}], RULES)
+            [{"po_line": PO["line_items"][0]}], RULES, same_currency=True)
         self.assertEqual({d["field_name"] for d in found}, {"subtotal_amount", "total_amount"})
+        self.assertEqual({d["action"] for d in found}, {"manual_review"})  # 6% over is well under the reject limit
 
     def test_second_invoice_on_a_po_is_flagged(self):
         result = validation.validate_invoice_data(self.INVOICE, [self.LINE], RULES, po_repeats=[{"file_name": "a.pdf"}])
@@ -237,7 +242,8 @@ class Api(unittest.TestCase):
         main.app.dependency_overrides.clear()
         self.assertGreaterEqual(len(main.api.routes), 11)
         for route in main.api.routes:
-            path = route.path.replace("{invoice_id}", "00000000-0000-0000-0000-000000000000").replace("{run_id}", "1")
+            path = route.path.replace("{invoice_id}", "00000000-0000-0000-0000-000000000000").replace("{run_id}", "1") \
+                .replace("{job_id}", "00000000-0000-0000-0000-000000000000")
             for method in route.methods - {"HEAD", "OPTIONS"}:
                 self.assertEqual(self.client.request(method, path, json={}).status_code, 401, path)
 
@@ -254,10 +260,61 @@ class Api(unittest.TestCase):
     def test_query_is_rate_limited_and_errors_stay_generic(self):
         with mock.patch.object(main, "answer_query", side_effect=RuntimeError("internal detail")):
             first = self.client.post("/query", json={"question": "hello"})
-            self.assertEqual(first.status_code, 502)
-            self.assertNotIn("internal detail", first.text)
+            self.assertEqual(first.status_code, 202)
+            job = self.client.get(f"/jobs/{first.json()['job_id']}")
+            self.assertEqual(job.json()["status"], "failed")
+            self.assertEqual(job.json()["code"], 502)
+            self.assertNotIn("internal detail", job.text)
             codes = [self.client.post("/query", json={"question": "hello"}).status_code for _ in range(25)]
         self.assertEqual(codes[-1], 429)
+
+    def test_a_slow_request_returns_before_its_result_and_only_its_owner_can_read_it(self):
+        with mock.patch.object(main, "answer_query", return_value={"answer": "private"}):
+            job_id = self.client.post("/query", json={"question": "hello"}).json()["job_id"]
+        job = self.client.get(f"/jobs/{job_id}").json()
+        self.assertEqual(job, {"status": "done", "result": {"answer": "private"}})
+        main.app.dependency_overrides[auth.current_reviewer] = lambda: "other@example.com"
+        self.assertEqual(self.client.get(f"/jobs/{job_id}").status_code, 404)
+
+    def test_old_jobs_are_removed(self):
+        main._jobs["old"] = {"reviewer": "reviewer@example.com", "started": time.monotonic() - main.JOB_KEEP_SECONDS - 1,
+                             "status": "done"}
+        with mock.patch.object(main, "answer_query", return_value={}):
+            self.client.post("/query", json={"question": "hello"})
+        self.assertNotIn("old", main._jobs)
+
+    def test_recheck_failures_keep_their_meaning(self):
+        invoice = "00000000-0000-0000-0000-000000000000"
+        with mock.patch.object(main.workflow, "revalidate", side_effect=LookupError("internal detail")):
+            job_id = self.client.post(f"/invoices/{invoice}/revalidate").json()["job_id"]
+        job = self.client.get(f"/jobs/{job_id}").json()
+        self.assertEqual((job["status"], job["code"], job["detail"]), ("failed", 404, "Invoice not found"))
+
+    def test_totals_never_add_up_invoices_with_no_currency_and_say_what_they_are(self):
+        state = {"intent": "sum_totals", "filters": {}, "also_asked": "which invoices were flagged"}
+        rows = [{"currency": "USD", "invoices": 4, "total": "2442.00"}, {"currency": None, "invoices": 2, "total": None}]
+        notes = " ".join(graph._notes(state, rows))
+        self.assertIn("not revenue", notes)
+        self.assertIn("no currency on record: 2", notes)
+        self.assertIn("Not answered here: which invoices were flagged", notes)
+        with mock.patch.object(main.repo.db, "connection") as connection:
+            cursor = connection.return_value.__enter__.return_value.execute.return_value
+            cursor.fetchall.return_value, cursor.description = [], []
+            main.repo.structured_query("sum_totals", {})
+        self.assertIn("FILTER (WHERE currency IS NOT NULL)", connection.return_value.__enter__.return_value.execute.call_args[0][0])
+
+    def test_parsers_cannot_open_network_connections(self):
+        script = ("import socket\n"
+                  "try:\n    socket.socket()\n    print('open')\n"
+                  "except PermissionError:\n    print('refused')\n")
+        run = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                             preexec_fn=extraction._parser_limits(2 * 1024 ** 3))
+        self.assertEqual(run.stdout.strip(), "refused", run.stderr)
+        # A process the parser starts, such as OCR, inherits the block.
+        nested = f"import subprocess, sys; subprocess.run([sys.executable, '-c', {script!r}])"
+        run = subprocess.run([sys.executable, "-c", nested], capture_output=True, text=True,
+                             preexec_fn=extraction._parser_limits(2 * 1024 ** 3))
+        self.assertEqual(run.stdout.strip(), "refused", run.stderr)
 
     def test_only_one_rebuild_at_a_time(self):
         with main._reindex_running:
@@ -286,6 +343,52 @@ class Api(unittest.TestCase):
                 response = self.client.get("/health")
         self.assertEqual(response.json(), {"status": "degraded"})
         self.assertEqual(probe.call_count, 1)
+
+
+class Overcharges(unittest.TestCase):
+    def outcome(self, price, quantity="100", currency="USD"):
+        net = Decimal(price) * Decimal(quantity)
+        invoice = {"po_number": "PO-1", "vendor_name": "Acme", "currency": currency, "tax_rate_pct": "18",
+                   "subtotal_amount": str(net), "total_amount": str(net * Decimal("1.18"))}
+        line = {"line_number": 1, "item_code": "BOLT-8", "description": "Steel bolts M8", "quantity": quantity,
+                "unit_price": price}
+        found = validation.validate_business(invoice, [line], RULES, FakeERP(), use_llm=False)["discrepancies"]
+        return report.recommend(found, None, RULES)[0]
+
+    def test_ordinary_price_differences_stay_with_a_reviewer(self):
+        self.assertEqual(self.outcome("100"), "approve")
+        self.assertEqual(self.outcome("116.67"), "review")  # like the INV-1001 sample
+        self.assertEqual(self.outcome("150"), "review")     # exactly at the limit
+
+    def test_far_above_the_po_is_rejected(self):
+        self.assertEqual(self.outcome("151"), "reject")
+        self.assertEqual(self.outcome("799"), "reject")     # like INV-2004
+
+    def test_billing_far_more_units_than_ordered_is_rejected(self):
+        self.assertEqual(self.outcome("100", quantity="200"), "reject")
+
+    def test_undercharging_is_not_an_overcharge(self):
+        self.assertEqual(self.outcome("10"), "review")
+
+    def test_another_currency_is_never_treated_as_an_overcharge(self):
+        self.assertEqual(self.outcome("25000", currency="EUR"), "review")
+
+
+class SourcesForDisplay(unittest.TestCase):
+    def test_the_search_label_is_replaced_by_fields(self):
+        text = "[Invoice INV-1 | Acme | PO PO-1 | file a | b.pdf] audit report\nRecommendation: Reject. " + "word " * 300
+        _, sources = build_context([{"payload": {"source_type": "report", "invoice_number": "INV-1", "invoice_id": "i",
+                                                 "po_number": "PO-1", "chunk_text": text}}])
+        self.assertEqual(sources[0]["po_number"], "PO-1")
+        self.assertEqual(sources[0]["file_name"], "a | b.pdf")
+        self.assertTrue(sources[0]["excerpt"].startswith("Recommendation: Reject."))
+        self.assertLessEqual(len(sources[0]["excerpt"]), 1001)
+        self.assertTrue(sources[0]["excerpt"].endswith("word…"))
+
+    def test_text_with_no_label_stays_whole(self):
+        _, sources = build_context([{"payload": {"chunk_text": "[Invoice looks like a label\nbut has no ending"}}])
+        self.assertIsNone(sources[0]["file_name"])
+        self.assertIn("looks like a label", sources[0]["excerpt"])
 
 
 class Uploads(unittest.TestCase):

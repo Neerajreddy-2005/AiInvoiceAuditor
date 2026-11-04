@@ -261,7 +261,8 @@ def validate_invoice_data(invoice: dict, line_items: list[dict], rules: dict,
         files = ", ".join(r["file_name"] for r in po_repeats[:5])
         found.append(discrepancy(
             "duplicate", "po_number", action=policy(rules, "repeat_po_billing"), invoice_value=invoice.get("po_number"),
-            message=f"PO {invoice.get('po_number')} was already invoiced by {files}: check this isn't billed twice"))
+            message=f"Purchase order {invoice.get('po_number')} was already invoiced by {files}: "
+                    "check this isn't billed twice"))
 
     return {"discrepancies": found, "missing_fields": missing}
 
@@ -375,7 +376,8 @@ def _llm_match(unmatched: list[dict], available: list[dict], taken: set[int]) ->
     return out
 
 
-def _check_against_po_value(invoice: dict, line_items: list[dict], matches: list[dict], rules: dict) -> list[dict]:
+def _check_against_po_value(invoice: dict, line_items: list[dict], matches: list[dict], rules: dict,
+                            same_currency: bool) -> list[dict]:
     """The invoice's money can't exceed what the PO allows, even if each small step looks like rounding."""
     if not matches or any(m["po_line"] is None or D(m["po_line"]["quantity"]) is None
                           or D(m["po_line"]["unit_price"]) is None for m in matches):
@@ -385,19 +387,29 @@ def _check_against_po_value(invoice: dict, line_items: list[dict], matches: list
     limit = Decimal(str(tol["rounding_absolute_limit"]))
     allowed_net = sum(D(m["po_line"]["quantity"]) * D(m["po_line"]["unit_price"]) * price_factor for m in matches)
     subtotal, total, rate = (D(invoice.get(f)) for f in ("subtotal_amount", "total_amount", "tax_rate_pct"))
+    reject_percent = Decimal(str(tol["overcharge_reject_percent"]))
+    reject_factor = (1 + reject_percent / 100) / price_factor
+
+    def check(amount: Decimal, allowed: Decimal) -> tuple[str, str]:
+        if same_currency and amount > allowed * reject_factor:
+            return policy(rules, "overcharge"), f", and over {_fmt(reject_percent)}% above the PO"
+        return policy(rules, "price_mismatch"), ""
+
     found = []
     if subtotal is not None and subtotal > allowed_net + limit:
+        action, extra = check(subtotal, allowed_net)
         found.append(discrepancy(
-            "erp_price", "subtotal_amount", action=policy(rules, "price_mismatch"), invoice_value=subtotal,
+            "erp_price", "subtotal_amount", action=action, invoice_value=subtotal,
             expected_value=allowed_net.quantize(Decimal("0.01")),
-            message=f"Subtotal {_fmt(subtotal)} is above the {allowed_net:.2f} the PO allows, including price tolerance"))
+            message=f"Subtotal {_fmt(subtotal)} is above the {allowed_net:.2f} the PO allows, including price tolerance{extra}"))
     if total is not None:
         allowed_total = allowed_net * (1 + (rate or Decimal(0)) / 100)
         if total > allowed_total + limit:
+            action, extra = check(total, allowed_total)
             found.append(discrepancy(
-                "erp_price", "total_amount", action=policy(rules, "price_mismatch"), invoice_value=total,
+                "erp_price", "total_amount", action=action, invoice_value=total,
                 expected_value=allowed_total.quantize(Decimal("0.01")),
-                message=f"Total {_fmt(total)} is above the {allowed_total:.2f} the PO allows, including price tolerance and tax"))
+                message=f"Total {_fmt(total)} is above the {allowed_total:.2f} the PO allows, including price tolerance and tax{extra}"))
     return found
 
 
@@ -441,6 +453,9 @@ def validate_business(invoice: dict, line_items: list[dict], rules: dict, erp, u
                                  message=f"Currency is not printed on the invoice; the PO is in {po_currency}"))
 
     price_tol = Decimal(str(tol["price_difference_percent"]))
+    reject_percent = Decimal(str(tol["overcharge_reject_percent"]))
+    # Amounts in another currency can't be compared with the PO's, so they never count as an overcharge.
+    same_currency = not inv_currency or inv_currency == po_currency
     qty_tol = Decimal(str(tol["quantity_difference_percent"]))
     matches = _match_lines(line_items, po["line_items"], rules, use_llm)
     result["line_matches"] = [{"invoice_line": m["invoice_line"]["line_number"],
@@ -487,11 +502,14 @@ def validate_business(invoice: dict, line_items: list[dict], rules: dict, erp, u
         if price is not None and po_price is not None:
             dev = deviation_pct(price, po_price)
             if dev is not None and abs(dev) > price_tol:
+                overcharged = same_currency and dev > reject_percent
                 found.append(discrepancy(
-                    "erp_price", "unit_price", line_number=n, action=policy(rules, "price_mismatch"),
+                    "erp_price", "unit_price", line_number=n,
+                    action=policy(rules, "overcharge" if overcharged else "price_mismatch"),
                     invoice_value=price, erp_value=po_price, deviation=dev, tolerance=price_tol,
                     message=f"Line {n} ({pl['item_code']}): unit price {_fmt(price)} vs PO {_fmt(po_price)} "
-                            f"({dev:+.1f}%, tolerance ±{_fmt(price_tol)}%)"))
+                            f"({dev:+.1f}%, tolerance ±{_fmt(price_tol)}%"
+                            + (f", reject limit +{_fmt(reject_percent)}%)" if overcharged else ")")))
 
         code = pl["item_code"]
         if code not in sku_cache:
@@ -516,5 +534,5 @@ def validate_business(invoice: dict, line_items: list[dict], rules: dict, erp, u
                 "erp_line", "line_item", action=policy(rules, "uninvoiced_po_line"), erp_value=pl["item_code"],
                 message=f"PO line {pl['line_number']} ({pl['item_code']} {pl['description']}) was not invoiced"))
 
-    found.extend(_check_against_po_value(invoice, line_items, matches, rules))
+    found.extend(_check_against_po_value(invoice, line_items, matches, rules, same_currency))
     return result

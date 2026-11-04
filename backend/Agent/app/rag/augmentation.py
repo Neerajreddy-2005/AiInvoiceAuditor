@@ -11,6 +11,8 @@ REPORT_WORDS = {"why", "flag", "flagged", "reject", "rejected", "review", "appro
 STOP = {"the", "a", "an", "of", "for", "to", "in", "on", "and", "or", "is", "was", "were", "what", "which",
         "how", "does", "did", "do", "this", "that", "with", "by", "from", "are", "it", "its", "invoice"}
 FAKE_LABEL = re.compile(r"^\s*\[\d+\]", re.MULTILINE)
+SEARCH_LABEL = re.compile(r"^\[Invoice .* \| file (?P<file>.*)\](?: audit report)?$")
+EXCERPT_CHARS = 1000  # more than a chunk, so a reader normally sees the whole passage the answer used
 
 
 def _terms(text: str) -> set[str]:
@@ -36,6 +38,16 @@ def rerank(question: str, hits: list[dict], keep: int) -> list[dict]:
     return scored[:keep]
 
 
+def _for_display(chunk: str) -> tuple[str | None, str]:
+    """Each chunk starts with a label that helps search. A reader gets that as fields instead."""
+    first_line, _, rest = chunk.partition("\n")
+    label = SEARCH_LABEL.match(first_line)
+    file_name, text = (label["file"], rest) if label else (None, chunk)
+    if len(text) > EXCERPT_CHARS:
+        text = text[:EXCERPT_CHARS].rsplit(" ", 1)[0].rstrip() + "…"
+    return file_name, text
+
+
 def build_context(hits: list[dict]) -> tuple[str, list[dict]]:
     blocks, sources = [], []
     for n, hit in enumerate(hits, start=1):
@@ -45,7 +57,8 @@ def build_context(hits: list[dict]) -> tuple[str, list[dict]]:
         text = FAKE_LABEL.sub("(quoted text)", p.get("chunk_text", ""))
         blocks.append(f"[{n}] ({p.get('source_type')}, invoice {p.get('invoice_number') or 'with no number'}, "
                       f"id {str(p.get('invoice_id'))[:8]})\n{text}")
+        file_name, excerpt = _for_display(p.get("chunk_text", ""))
         sources.append({"ref": n, "invoice_id": p.get("invoice_id"), "invoice_number": p.get("invoice_number"),
-                        "vendor": p.get("vendor"), "source_type": p.get("source_type"),
-                        "score": hit.get("rerank_score"), "excerpt": p.get("chunk_text", "")[:300]})
+                        "vendor": p.get("vendor"), "po_number": p.get("po_number"), "file_name": file_name,
+                        "source_type": p.get("source_type"), "score": hit.get("rerank_score"), "excerpt": excerpt})
     return "\n\n".join(blocks), sources

@@ -112,9 +112,12 @@ prompts:
     template: |
       Write a short audit summary (3-5 sentences) of this invoice validation
       for a finance reviewer. State the recommendation and the main reasons,
-      mention the most important discrepancies with their values, and note
-      translation confidence if the invoice was translated. Do not add facts
-      that are not in the data. Plain text, no headings or bullet points.
+      mention the most important discrepancies with their values. Mention
+      translation only if the invoice was in another language and its
+      translation confidence is low. Do not add facts that are not in the
+      data. Describe fields in plain words ("the item code on line 1"), never
+      by internal names like line_items[1].item_code. Plain text, no headings
+      or bullet points.
 
       Validation result (JSON):
       {{report}}
@@ -143,8 +146,12 @@ prompts:
 
       Today's date is {{today}}.
 
+      A SQL intent answers one thing. If the question also asks for something
+      that intent won't answer, put that part in also_asked, in a few words.
+      Otherwise also_asked is null.
+
       Return ONLY JSON:
-      {"route": "sql" | "rag", "intent": "<intent or null>", "filters": {...}}
+      {"route": "sql" | "rag", "intent": "<intent or null>", "filters": {...}, "also_asked": "<text or null>"}
 
       Question: {{question}}
 
@@ -169,7 +176,12 @@ prompts:
 
       Question: {{question}}
 
-      Answer concisely using only the context and cite the passages you used.
+      Answer concisely using only the context. Start with one sentence that
+      answers the question directly. If there are several reasons or facts,
+      follow it with a list, most important first: one point per line, each
+      starting with "- ". Write for a finance reviewer, in plain words, and
+      describe fields that way too, not by internal names. No headings. After
+      each point, cite only the passages that support it, like [1].
 
   rag_reflection:
     persona: judge

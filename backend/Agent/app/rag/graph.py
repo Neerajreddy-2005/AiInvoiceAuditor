@@ -27,6 +27,7 @@ from .retrieval import retrieve
 
 log = logging.getLogger(__name__)
 SQL_INTENTS = {"list_invoices", "count_invoices", "sum_totals", "invoice_discrepancies"}
+ANSWER_FORMAT = 2  # raise when the shape of a stored answer changes, so old ones aren't served
 
 
 class RAGState(TypedDict, total=False):
@@ -35,6 +36,7 @@ class RAGState(TypedDict, total=False):
     route: str
     intent: str | None
     filters: dict
+    also_asked: str | None
     search_query: str
     attempt: int
     context: str
@@ -61,7 +63,9 @@ def route_question(state: RAGState) -> dict:
         log.warning("Router unavailable (%s); using RAG", exc)
         decision = {}
     if decision.get("route") == "sql" and decision.get("intent") in SQL_INTENTS:
-        return {**base, "route": "sql", "intent": decision["intent"], "filters": decision.get("filters") or {}}
+        also_asked = decision.get("also_asked")
+        return {**base, "route": "sql", "intent": decision["intent"], "filters": decision.get("filters") or {},
+                "also_asked": also_asked[:200] if isinstance(also_asked, str) else None}
     return {**base, "route": "rag"}
 
 
@@ -76,6 +80,22 @@ def _table(columns: list[str], rows: list[dict]) -> str:
     return "\n".join([head, sep, *body])
 
 
+def _notes(state: RAGState, rows: list[dict]) -> list[str]:
+    """What a table can't say by itself. A fixed query answers one thing, so say what it left out."""
+    notes = []
+    if state["intent"] == "sum_totals":
+        notes.append("These are amounts vendors billed, not revenue."
+                     + ("" if (state.get("filters") or {}).get("recommendation")
+                        else " They include flagged and rejected invoices."))
+        no_currency = sum(int(r["invoices"]) for r in rows if r.get("currency") is None)
+        if no_currency:
+            notes.append(f"Invoices with no currency on record: {no_currency}. They may be in different currencies, "
+                         "so they aren't added up. Correct the currency on their review pages to include them.")
+    if state.get("also_asked"):
+        notes.append(f"Not answered here: {state['also_asked']}. Please ask that separately.")
+    return notes
+
+
 def sql_answer(state: RAGState) -> dict:
     try:
         columns, rows = repo.structured_query(state["intent"], state.get("filters") or {})
@@ -84,7 +104,7 @@ def sql_answer(state: RAGState) -> dict:
         return {"route": "rag"}
     return {"answer": _table(columns, rows),
             "final": {"route": "sql", "intent": state["intent"], "filters": state.get("filters"),
-                      "answer": _table(columns, rows), "rows": rows[:50], "passed": True,
+                      "answer": _table(columns, rows), "rows": rows, "notes": _notes(state, rows), "passed": True,
                       "scores": None, "attempts": [], "sources": []}}
 
 
@@ -140,8 +160,8 @@ def finalize(state: RAGState) -> dict:
     passed = best["scores"]["average"] > threshold
     answer = best["answer"]
     if not passed:
-        answer += (f"\n\n_Low confidence: this answer scored {best['scores']['average']:.2f} on the RAG Triad "
-                   f"(threshold {threshold}) after {len(state['attempts'])} attempts. Please verify it._")
+        answer += (f"\n\nLow confidence: this answer scored {best['scores']['average']:.2f} on the RAG Triad "
+                   f"(threshold {threshold}) after {len(state['attempts'])} attempts. Please verify it.")
     return {"final": {"route": "rag", "answer": answer, "passed": passed, "scores": best["scores"],
                       "sources": best["sources"], "attempts": [
                           {"attempt": a["attempt"], "query": a["query"], "scores": a["scores"]}
@@ -180,7 +200,7 @@ def answer_query(question: str, invoice_id: str | None = None) -> dict:
     if _graph is None:
         _graph = build_graph()
     question = question.strip()
-    key = cache.make_key("rag", question.lower(), invoice_id, store.point_count(), repo.last_indexed_at())
+    key = cache.make_key("rag", ANSWER_FORMAT, question.lower(), invoice_id, store.point_count(), repo.last_indexed_at())
     cached = cache.get_json(key)
     if cached:
         return {**cached, "cached": True}

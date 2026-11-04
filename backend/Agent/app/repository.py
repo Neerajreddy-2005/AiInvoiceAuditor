@@ -447,7 +447,9 @@ def structured_query(intent: str, filters: dict) -> tuple[list[str], list[dict]]
                f"SELECT count(*) AS invoices FROM audit.invoice_audit WHERE {where}")
     elif intent == "sum_totals":
         extra = f", {group} AS {filters['group_by']}" if group and group != "currency" else ""
-        sql = (f"SELECT currency{extra}, count(*) AS invoices, sum(total_amount) AS total "
+        # Invoices with no currency may be in different ones, so they are counted but never added up.
+        sql = (f"SELECT currency{extra}, count(*) AS invoices, "
+               "sum(total_amount) FILTER (WHERE currency IS NOT NULL) AS total "
                f"FROM audit.invoice_audit WHERE {where} GROUP BY currency{', 2' if extra else ''} ORDER BY 1")
     elif intent == "invoice_discrepancies":
         sql = ("SELECT a.invoice_number, d.field_name, d.line_number, d.invoice_value, d.erp_value, "
