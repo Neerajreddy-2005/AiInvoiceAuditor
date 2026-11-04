@@ -188,7 +188,7 @@ class InvoiceMonitor:
     def index_sweep(self) -> None:
         """Index completed invoices whose indexing failed earlier (e.g. Gemini throttling)."""
         cfg = agent_config()["monitor"]
-        if time.monotonic() < self._next_index_sweep:
+        if time.monotonic() < self._next_index_sweep or indexing.rebuilding.locked():
             return
         given_up = {i for i, n in self._index_failures.items() if n >= cfg["max_index_failures"]}
         for invoice_id in repo.unindexed_invoice_ids(limit=5 + len(given_up)):

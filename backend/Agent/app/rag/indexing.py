@@ -6,6 +6,7 @@ never from the invoice file, so losing the Qdrant volume means a rebuild,
 not data loss: no OCR is repeated and no invoice is re-read.
 """
 import logging
+import threading
 import uuid
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -18,6 +19,9 @@ from ..settings import agent_config
 from . import store
 
 log = logging.getLogger(__name__)
+
+
+rebuilding = threading.Lock()  # held during a rebuild, so the monitor's sweep doesn't index the same invoices
 
 
 def _splitter() -> RecursiveCharacterTextSplitter:
@@ -78,16 +82,17 @@ def index_invoice(invoice_id: str) -> int:
 
 def rebuild_all() -> dict:
     """Recreate the collection from PostgreSQL alone."""
-    store.ensure_collection(recreate=True)
-    repo.clear_all_indexed()  # the points are gone, so whatever this rebuild misses must be retried
-    indexed, failed = 0, []
-    for invoice_id in repo.indexable_invoice_ids():
-        try:
-            indexed += 1 if index_invoice(invoice_id) else 0
-        except Exception as exc:  # keep going; report what failed
-            log.error("Re-indexing %s failed: %s", invoice_id, exc)
-            failed.append(invoice_id)
-    return {"invoices_indexed": indexed, "failed": failed, "points": store.point_count()}
+    with rebuilding:
+        store.ensure_collection(recreate=True)
+        repo.clear_all_indexed()  # the points are gone, so whatever this rebuild misses must be retried
+        indexed, failed = 0, []
+        for invoice_id in repo.indexable_invoice_ids():
+            try:
+                indexed += 1 if index_invoice(invoice_id) else 0
+            except Exception as exc:  # keep going; report what failed
+                log.error("Re-indexing %s failed: %s", invoice_id, exc)
+                failed.append(invoice_id)
+        return {"invoices_indexed": indexed, "failed": failed, "points": store.point_count()}
 
 
 def ensure_index_on_startup() -> None:

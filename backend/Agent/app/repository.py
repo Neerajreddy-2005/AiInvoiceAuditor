@@ -331,16 +331,21 @@ def find_same_number(invoice_id: str, normalised_number: str) -> list[dict]:
             (invoice_id, normalised_number)).fetchall()
 
 
-def find_earlier_on_po(invoice_id: str, po_number: str | None) -> list[dict]:
-    """Earlier invoices billed against the same PO, whatever their invoice number."""
+def find_earlier_on_po(invoice_id: str, po_number: str | None, first_read: bool = False) -> list[dict]:
+    """Earlier invoices billed against the same PO, whatever their invoice number.
+
+    On a first read, a later invoice that already got its PO counts too: this one failed before
+    its PO was read, so that invoice couldn't have seen it. A re-check doesn't count them.
+    """
     if not po_number:
         return []
     with db.connection() as conn:
         return conn.execute(
             "SELECT invoice_id::text, file_name FROM audit.invoice_audit "
-            "WHERE detected_at < (SELECT detected_at FROM audit.invoice_audit WHERE invoice_id = %s) "
+            "WHERE invoice_id <> %s AND (%s OR detected_at < (SELECT detected_at FROM audit.invoice_audit "
+            "WHERE invoice_id = %s)) "
             "AND upper(po_number) = upper(%s) AND processing_status <> 'unsupported' ORDER BY detected_at",
-            (invoice_id, po_number)).fetchall()
+            (invoice_id, first_read, invoice_id, po_number)).fetchall()
 
 
 def pending_corrections(invoice_id: str) -> list[dict]:

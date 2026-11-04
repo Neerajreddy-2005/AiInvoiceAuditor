@@ -334,6 +334,7 @@ class FeedbackIn(BaseModel):
     line_number: int | None = None
     corrected_value: str | None = Field(None, max_length=1000)
     comment: str | None = Field(None, max_length=2000)
+    run_number: int | None = None  # for a decision: the run the reviewer was looking at
 
 
 def _normalise(kind: str, value: str) -> str:
@@ -393,6 +394,11 @@ def add_feedback(invoice_id: UUID, body: FeedbackIn, reviewer: str = Depends(rat
         if row["processing_status"] != "completed":
             raise HTTPException(409, "Only fully processed invoices can be decided "
                                      f"(status: {row['processing_status']})")
+        latest = repo.latest_run(invoice_id)
+        if body.run_number is None:
+            raise HTTPException(422, "A decision must say which run it is for")
+        if not latest or body.run_number != latest["run_number"]:
+            raise HTTPException(409, "This invoice was re-checked since you opened it. Please review the new result.")
         feedback_id = repo.insert_feedback(
             invoice_id=invoice_id, feedback_type="decision", field_name="recommendation", line_number=None,
             original_value=row.get("recommendation"), corrected_value=body.corrected_value,

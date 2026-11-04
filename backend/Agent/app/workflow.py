@@ -160,7 +160,8 @@ def validate_data(state: InvoiceState) -> dict:
 
     same_number = repo.find_same_number(state["invoice_id"], normalise_invoice_number(invoice.get("invoice_number")))
     duplicates = [d for d in same_number if same_vendor(invoice.get("vendor_name"), d["vendor_name"], rules())]
-    po_repeats = repo.find_earlier_on_po(state["invoice_id"], invoice.get("po_number"))
+    po_repeats = repo.find_earlier_on_po(state["invoice_id"], invoice.get("po_number"),
+                                         first_read=state.get("mode") != "revalidate")
     result = validate_invoice_data(invoice, state["line_items"], rules(), duplicates, po_repeats)
     run_id, run_number = repo.start_run(state["invoice_id"], state["trigger"], state.get("triggered_by"),
                                         state.get("corrections_applied") or [], result["discrepancies"])

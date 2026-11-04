@@ -11,6 +11,12 @@ ARG SUPABASE_PUBLISHABLE_KEY
 ENV SUPABASE_URL=$SUPABASE_URL SUPABASE_PUBLISHABLE_KEY=$SUPABASE_PUBLISHABLE_KEY
 RUN npm run build
 
+# Republishes the built site to Netlify when a public demo starts (see compose.yaml).
+FROM build AS publisher
+RUN apk upgrade --no-cache && npm install -g netlify-cli@27.16.2 && chown node:node /app && chown -R node:node /app/dist
+USER node
+CMD ["node", "scripts/publish-demo.mjs"]
+
 FROM nginxinc/nginx-unprivileged:1.29.3-alpine
 # Security fixes newer than the base image, then back to its unprivileged user.
 USER root

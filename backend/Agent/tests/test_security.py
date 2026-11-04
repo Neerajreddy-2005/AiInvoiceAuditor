@@ -345,6 +345,46 @@ class Api(unittest.TestCase):
         self.assertEqual(probe.call_count, 1)
 
 
+class SmallFixes(unittest.TestCase):
+    def line(self, text):
+        return parsing.parse_invoice(text)["line_items"][0]
+
+    def test_a_dot_groups_thousands_only_in_a_document_with_decimal_commas(self):
+        german = "Datum: 15.03.2025\nDescription: Kisten\nQuantity: 1.500\nUnit Price: 2,50\nTotal: 3.750,00"
+        self.assertEqual(Decimal(self.line(german)["quantity"]), Decimal("1500"))
+        english = "Description: Bolts\nQuantity: 1.500\nUnit Price: $2.50\nTotal: $3.75"
+        self.assertEqual(Decimal(self.line(english)["quantity"]), Decimal("1.5"))
+        self.assertEqual(parsing.parse_number("1.500"), Decimal("1.500"))  # no document: stays a decimal
+
+    def decide(self, **body):
+        invoice = "00000000-0000-0000-0000-000000000000"
+        client = TestClient(main.app, raise_server_exceptions=False)
+        main.app.dependency_overrides[auth.current_reviewer] = lambda: "reviewer@example.com"
+        self.addCleanup(main.app.dependency_overrides.clear)
+        main._recent_calls.clear()
+        with mock.patch.object(main.repo, "get_invoice", return_value={"processing_status": "completed", "recommendation": "review"}), \
+                mock.patch.object(main.repo, "latest_run", return_value={"run_number": 2}), \
+                mock.patch.object(main.repo, "insert_feedback", return_value=1) as insert:
+            response = client.post(f"/invoices/{invoice}/feedback",
+                                   json={"feedback_type": "decision", "corrected_value": "approve", **body})
+        return response.status_code, insert.call_count
+
+    def test_a_decision_from_a_stale_tab_is_refused(self):
+        self.assertEqual(self.decide(run_number=1), (409, 0))
+        self.assertEqual(self.decide(), (422, 0))
+        self.assertEqual(self.decide(run_number=2), (201, 1))
+
+    def test_the_sweep_waits_for_a_rebuild(self):
+        sweep = monitor_agent.InvoiceMonitor()
+        with mock.patch.object(monitor_agent.repo, "unindexed_invoice_ids", return_value=["i"]) as unindexed, \
+                mock.patch.object(monitor_agent.indexing, "index_invoice") as index:
+            with monitor_agent.indexing.rebuilding:
+                sweep.index_sweep()
+            unindexed.assert_not_called()
+            sweep.index_sweep()
+        index.assert_called_once_with("i")
+
+
 class DailyGeminiLimit(unittest.TestCase):
     class FakeRedis:
         def __init__(self):

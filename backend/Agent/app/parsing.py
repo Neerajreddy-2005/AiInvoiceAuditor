@@ -12,6 +12,7 @@ Rules:
 import re
 import unicodedata
 from collections import Counter
+from contextvars import ContextVar
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from difflib import get_close_matches
@@ -102,6 +103,16 @@ def _fold(text: str) -> str:
 
 # ---------------------------------------------------------------- values
 
+# Set while reading a document whose decimals use a comma: there, 1.500 means 1500.
+_dot_groups_thousands: ContextVar[bool] = ContextVar("dot_groups_thousands", default=False)
+
+
+def _uses_decimal_comma(text: str) -> bool:
+    without_dates = re.sub(r"\b\d{1,2}\.\d{1,2}\.\d{2,4}\b", " ", text)
+    return (re.search(r"\d,\d{1,2}(?!\d)", without_dates) is not None
+            and re.search(r"\d\.\d{1,2}(?!\d)", without_dates) is None)
+
+
 def parse_number(raw: str) -> Decimal | None:
     s = raw.strip().replace("'", "").replace(" ", "")
     if not s or not re.search(r"\d", s):
@@ -114,7 +125,7 @@ def parse_number(raw: str) -> Decimal | None:
     elif "," in s:
         parts = s.split(",")
         s = s.replace(",", ".") if len(parts) == 2 and len(parts[1]) in (1, 2) else s.replace(",", "")
-    elif s.count(".") > 1:
+    elif s.count(".") > 1 or (_dot_groups_thousands.get() and re.fullmatch(r"-?\d{1,3}\.\d{3}", s)):
         s = s.replace(".", "")
     try:
         return Decimal(s)
@@ -300,6 +311,14 @@ def _key_value_item(lines: list[str], symbol_map: dict) -> tuple[dict | None, se
 
 def parse_invoice(text: str, symbol_map: dict | None = None) -> dict:
     """Returns {"fields": {...}, "line_items": [...], "extras": {...}}; all values are strings or None."""
+    number_style = _dot_groups_thousands.set(_uses_decimal_comma(text))
+    try:
+        return _read_invoice(text, symbol_map)
+    finally:
+        _dot_groups_thousands.reset(number_style)
+
+
+def _read_invoice(text: str, symbol_map: dict | None) -> dict:
     symbol_map = symbol_map or DEFAULT_SYMBOL_MAP
     # The field rules backtrack badly on long runs of spaces, so collapse them and cap each line first.
     lines = [re.sub(r"\s+", " ", ln).strip()[:MAX_LINE_CHARS] for ln in text.splitlines()]

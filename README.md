@@ -15,6 +15,8 @@ survive the containers being destroyed and recreated.
 
 **[Watch the 23-second demo](docs/demo.mp4)**, which uses sample invoices only.
 
+**Live demo: [ai-invoice-auditor.netlify.app](https://ai-invoice-auditor.netlify.app).** The backend runs from my own computer, so the site only works while I have it running, and signing in needs an approved account. The video above is always available.
+
 ## 1. Quick start
 
 Prerequisites: Docker Desktop (Compose v2) and a free Gemini API key from

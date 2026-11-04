@@ -123,8 +123,9 @@ class FakeRepository:
             return []
         return [r for r in self._earlier(invoice_id) if normalise_invoice_number(r.get("invoice_number")) == number]
 
-    def find_earlier_on_po(self, invoice_id, po_number):
-        return [r for r in self._earlier(invoice_id) if po_number and r.get("po_number") == po_number]
+    def find_earlier_on_po(self, invoice_id, po_number, first_read=False):
+        rows = (r for k, r in self.rows.items() if k != invoice_id) if first_read else self._earlier(invoice_id)
+        return [r for r in rows if po_number and r.get("po_number") == po_number]
 
     def start_run(self, invoice_id, trigger, triggered_by, corrections, discrepancies):
         run_id = len(self.runs) + 1
@@ -270,6 +271,18 @@ class Pipeline(unittest.TestCase):
             workflow.resume(invoice_id, row["thread_id"])
         self.assertEqual(row["processing_status"], "completed")
         self.assertEqual(row["recommendation"], "approve")
+
+    def test_two_invoices_on_one_po_are_flagged_even_if_the_first_failed_before_its_po_was_read(self):
+        with mock.patch.object(workflow, "extract", side_effect=ConnectionError("storage is down")):
+            with self.assertRaises(workflow.WorkflowError):
+                self.run_file("INV_EN_002.pdf")
+        first, row = next(iter(self.repo.rows.items()))
+        self.assertIsNone(row.get("po_number"))
+        self.run_file("INV_EN_002_scanned.pdf")  # sees no earlier invoice on the PO
+
+        workflow.resume(first, row["thread_id"])
+        self.assertEqual(row["recommendation"], "review")
+        self.assertIn("was already invoiced by INV_EN_002_scanned.pdf", self.messages(first))
 
     def test_a_file_changed_after_detection_is_refused(self):
         with tempfile.TemporaryDirectory() as folder:

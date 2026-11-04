@@ -1,8 +1,8 @@
 """Regression tests for Mock-ERP's access rules. No network or database.
 
-Run from the repository root:
-  docker run --rm --network none -v "$PWD/backend/Mock-ERP/tests:/app/tests:ro" \
-    invoice-auditor/mock-erp:1.0 python -m unittest discover -s tests -v
+Run from the repository root, in the agent image because the test client isn't in Mock-ERP's:
+  docker run --rm --network none -w /mock -v "$PWD/backend/Mock-ERP/app:/mock/app:ro" \
+    -v "$PWD/backend/Mock-ERP/tests:/mock/tests:ro" invoice-auditor/agent:1.0 python -m unittest discover -s tests -v
 """
 import os
 

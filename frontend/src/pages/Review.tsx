@@ -113,7 +113,7 @@ function Compare({ d }: { d: Discrepancy }) {
   );
 }
 
-function DecisionBar({ id, current, queue }: { id: string; current?: Feedback; queue: { done: number; total: number; next?: { invoice_id: string; label: string } } }) {
+function DecisionBar({ id, runNumber, current, queue }: { id: string; runNumber?: number; current?: Feedback; queue: { done: number; total: number; next?: { invoice_id: string; label: string } } }) {
   const queries = useQueryClient();
   const navigate = useNavigate();
   const [comment, setComment] = useState("");
@@ -121,7 +121,8 @@ function DecisionBar({ id, current, queue }: { id: string; current?: Feedback; q
   const timer = useRef<number | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
   const decide = useMutation({
-    mutationFn: (decision: Verdict) => api(`/invoices/${id}/feedback`, { feedback_type: "decision", corrected_value: decision, comment: comment.trim() || null }),
+    mutationFn: (decision: Verdict) => api(`/invoices/${id}/feedback`, { feedback_type: "decision", corrected_value: decision, comment: comment.trim() || null, run_number: runNumber }),
+    onError: () => queries.invalidateQueries({ queryKey: ["invoice", id] }), // it may have been re-checked elsewhere
     onSuccess: () => {
       setComment("");
       queries.invalidateQueries({ queryKey: ["invoice", id] });
@@ -439,7 +440,7 @@ export default function Review({ reviewer }: { reviewer: string }) {
           </div>
         </section>
       )}
-      {completed && <DecisionBar key={id} id={id} current={derived.decision} queue={queue} />}
+      {completed && <DecisionBar key={id} id={id} runNumber={latest?.run_number} current={derived.decision} queue={queue} />}
     </>
   );
 }
