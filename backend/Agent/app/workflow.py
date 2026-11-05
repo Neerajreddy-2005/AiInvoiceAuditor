@@ -33,7 +33,7 @@ from .extraction import extract, file_sha256
 from .parsing import parse_invoice, parse_number
 from .rag import indexing
 from .settings import rules, settings
-from .translate import translate
+from .translate import translate, used_model
 from .validation import (normalise_invoice_number, recover_missing_fields, same_vendor, validate_business,
                          validate_invoice_data)
 
@@ -54,6 +54,8 @@ class InvoiceState(TypedDict, total=False):
     source_language: str | None
     translated_text: str
     translation_confidence: float | None
+    ai_translated: bool
+    recovered_fields: dict
     trigger: str
     triggered_by: str | None
     corrections_applied: list
@@ -132,12 +134,14 @@ def translate_node(state: InvoiceState) -> dict:
                           translated_text=result["translated_text"], confidence=result["confidence"],
                           details=details)
     return {"source_language": result["source_language"], "translated_text": result["translated_text"],
-            "translation_confidence": result["confidence"]}
+            "translation_confidence": result["confidence"], "ai_translated": used_model(result["method"])}
 
 
 def _normalise_recovered(field: str, value: str) -> str | None:
     if field == "currency":
-        return value.upper()[:3]
+        # Unknown codes stay missing, for review: the model's reply must not be able to cause a rejection.
+        code = value.upper()
+        return code if code in rules()["accepted_currencies"] else None
     if field == "total_amount":
         number = parse_number(value)
         return None if number is None else str(number)
@@ -146,7 +150,9 @@ def _normalise_recovered(field: str, value: str) -> str | None:
 
 def validate_data(state: InvoiceState) -> dict:
     invoice = dict(state["invoice"])
-    if state.get("mode") != "revalidate":
+    first_read = state.get("mode") != "revalidate"
+    recovered_fields = state.get("recovered_fields") or {}
+    if first_read:
         wanted = [f for f in [*rules()["required_fields"]["header"], "po_number"] if not invoice.get(f)]
         if wanted:
             try:
@@ -155,14 +161,17 @@ def validate_data(state: InvoiceState) -> dict:
                                               for f, v in recovered["accepted"].items()) if v}
                 invoice.update(accepted)
                 repo.fill_recovered_fields(state["invoice_id"], accepted, recovered["rejected"])
+                recovered_fields = accepted
             except llm.LLMError as exc:
                 log.warning("Missing-field recovery skipped: %s", exc)
 
-    same_number = repo.find_same_number(state["invoice_id"], normalise_invoice_number(invoice.get("invoice_number")))
+    corrected = {c["field"] for c in state.get("corrections_applied") or []}
+    same_number = repo.find_same_number(state["invoice_id"], normalise_invoice_number(invoice.get("invoice_number")),
+                                        include_later=first_read or bool(corrected & {"invoice_number", "vendor_name"}))
     duplicates = [d for d in same_number if same_vendor(invoice.get("vendor_name"), d["vendor_name"], rules())]
     po_repeats = repo.find_earlier_on_po(state["invoice_id"], invoice.get("po_number"),
-                                         first_read=state.get("mode") != "revalidate")
-    result = validate_invoice_data(invoice, state["line_items"], rules(), duplicates, po_repeats)
+                                         include_later=first_read or "po_number" in corrected)
+    result = validate_invoice_data(invoice, state["line_items"], rules(), duplicates, po_repeats, recovered_fields)
     run_id, run_number = repo.start_run(state["invoice_id"], state["trigger"], state.get("triggered_by"),
                                         state.get("corrections_applied") or [], result["discrepancies"])
     return {"invoice": invoice, "run_id": run_id, "run_number": run_number,
@@ -180,7 +189,8 @@ def validate_business_node(state: InvoiceState) -> dict:
 
 def report_node(state: InvoiceState) -> dict:
     recommendation, status, reasons = reporting.recommend(
-        state["discrepancies"], state.get("translation_confidence"), rules())
+        state["discrepancies"], state.get("translation_confidence"), rules(),
+        state.get("ai_translated", True))  # a checkpoint from before this field existed: don't assume English
     report = reporting.build_report(
         invoice_id=state["invoice_id"], run_number=state["run_number"], trigger=state["trigger"],
         triggered_by=state.get("triggered_by"), file_name=state["file_name"],
@@ -325,11 +335,17 @@ def revalidate(invoice_id: str, requested_by: str) -> dict:
         raise ValueError("Only fully processed invoices can be re-validated "
                          f"(status is {row['processing_status']})")
     confidence = row.get("translation_confidence")
+    extras = row.get("extracted_raw") or {}
+    # Correcting a recovered field, even to the same value, is the person confirming it.
+    recovered = {f: v for f, v in (extras.get("llm_recovered_fields") or {}).items()
+                 if f not in {a["field"] for a in applied}}
     state = {"mode": "revalidate", "invoice_id": invoice_id, "file_name": row["file_name"],
              "raw_text": row.get("raw_extracted_text") or "", "extraction_method": row.get("extraction_method"),
              "invoice": invoice, "line_items": items, "source_language": row.get("source_language"),
              "translated_text": row.get("translated_text") or "",
              "translation_confidence": None if confidence is None else float(confidence),
+             "ai_translated": used_model((extras.get("translation") or {}).get("method")),
+             "recovered_fields": recovered,
              "trigger": "revalidation", "triggered_by": requested_by, "corrections_applied": applied,
              "feedback_ids": feedback_ids}
     # Refuse rather than queue: waiting callers would each hold an API worker thread.

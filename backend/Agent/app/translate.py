@@ -1,11 +1,13 @@
 """Translation agent: detect language, translate to English via Gemini, cache.
 
 Confidence = min(model's self-reported confidence, share of the source's
-numeric tokens that survive translation). A translation that drops or
-alters an amount cannot score high, whatever the model claims.
+numeric tokens that survive translation). A translation that drops, alters
+or adds an amount cannot score high, whatever the model claims. Swapped
+amounts still score 1.0, so this informs a reviewer and can't clear a review.
 """
 import logging
 import re
+from collections import Counter
 
 from langdetect import DetectorFactory, LangDetectException, detect_langs
 
@@ -29,13 +31,18 @@ def detect_language(text: str, hint: str | None = None) -> tuple[str | None, flo
 
 
 def numeric_preservation(source: str, translated: str) -> float:
-    numbers = re.findall(r"\d+(?:[.,]\d+)*", source)
-    if not numbers:
-        return 1.0
     # Whole tokens: 1000.00 is not preserved by 11000.00.
-    translated_numbers = set(re.findall(r"\d+(?:[.,]\d+)*", translated))
-    kept = sum(1 for n in numbers if n in translated_numbers)
-    return kept / len(numbers)
+    numbers = Counter(re.findall(r"\d+(?:[.,]\d+)*", source))
+    translated_numbers = Counter(re.findall(r"\d+(?:[.,]\d+)*", translated))
+    if not numbers and not translated_numbers:
+        return 1.0
+    kept = sum((numbers & translated_numbers).values())
+    return kept / max(numbers.total(), translated_numbers.total())
+
+
+def used_model(method: str | None) -> bool:
+    """Whether a translate() result came from the model, so no rule may rely on it. Unknown counts as yes."""
+    return not (method or "").startswith(("not required", "empty"))
 
 
 def translate(text: str, language_hint: str | None = None) -> dict:

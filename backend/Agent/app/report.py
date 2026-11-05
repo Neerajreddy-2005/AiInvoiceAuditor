@@ -2,7 +2,9 @@
 
 The recommendation is computed by rules, not by the model, so every
 decision can be traced to a discrepancy and a policy in rules.yaml.
-The model (Gemini) only writes the human-readable summary.
+The model (Gemini) writes the human-readable summary. Its other outputs
+(translations, recovered fields, line matches) are suggestions: each one
+sends the invoice to a person, and a line match can't decide a rejection.
 """
 import json
 import logging
@@ -23,7 +25,8 @@ _env = Environment(loader=FileSystemLoader(Path(__file__).parent / "templates"),
 RECOMMENDATION_LABELS = {"approve": "Approve", "review": "Manual review", "reject": "Reject"}
 
 
-def recommend(discrepancies: list[dict], translation_confidence, rules: dict) -> tuple[str, str, list[str]]:
+def recommend(discrepancies: list[dict], translation_confidence, rules: dict,
+              ai_translated: bool) -> tuple[str, str, list[str]]:
     """Returns (recommendation, validation_status, reasons)."""
     threshold = float(rules["validation_policies"]["auto_approve_confidence_threshold"])
     rejecting = [d for d in discrepancies if d["action"] == "reject"]
@@ -34,6 +37,8 @@ def recommend(discrepancies: list[dict], translation_confidence, rules: dict) ->
         reasons = [d["message"] for d in rejecting]
         return "reject", "failed", reasons
     reasons = [d["message"] for d in reviewing]
+    if ai_translated:
+        reasons.append("This invoice was translated by AI, so a person should check the translation")
     if low_confidence:
         reasons.append(f"Translation confidence {float(translation_confidence):.2f} is below "
                        f"the auto-approve threshold {threshold:.2f}")

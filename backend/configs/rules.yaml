@@ -109,7 +109,8 @@ validation_policies:
   # (by description) is recorded as "info" instead of a missing field.
   allow_item_code_from_po_match: true
   # Auto-approval requires no blocking discrepancy AND translation
-  # confidence >= this threshold.
+  # confidence >= this threshold. An invoice translated by the AI always
+  # goes to a person, whatever its confidence.
   auto_approve_confidence_threshold: 0.95
 
 # -------------------------------------------------------------

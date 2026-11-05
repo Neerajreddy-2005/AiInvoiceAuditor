@@ -108,9 +108,11 @@ class FakeRepository:
     def save_translation(self, invoice_id, *, source_language, translated_text, confidence, details):
         self.rows[invoice_id].update(source_language=source_language, translated_text=translated_text,
                                      translation_confidence=confidence)
+        self.rows[invoice_id].setdefault("extracted_raw", {})["translation"] = details
 
     def fill_recovered_fields(self, invoice_id, accepted, rejected):
         self.rows[invoice_id].update(accepted)
+        self.rows[invoice_id].setdefault("extracted_raw", {})["llm_recovered_fields"] = accepted
 
     def _earlier(self, invoice_id):
         for key, row in self.rows.items():
@@ -118,14 +120,23 @@ class FakeRepository:
                 return
             yield row
 
-    def find_same_number(self, invoice_id, number):
+    def _others(self, invoice_id, include_later):
+        return [r for k, r in self.rows.items() if k != invoice_id] if include_later else list(self._earlier(invoice_id))
+
+    def _effective(self, row, field):
+        corrections = [f for f in self.feedback if f["invoice_id"] == row["invoice_id"]
+                       and f["field_name"] == field and f["line_number"] is None]
+        return corrections[-1]["corrected_value"] if corrections else row.get(field)
+
+    def find_same_number(self, invoice_id, number, include_later=False):
         if not number:
             return []
-        return [r for r in self._earlier(invoice_id) if normalise_invoice_number(r.get("invoice_number")) == number]
+        return [{**r, "vendor_name": self._effective(r, "vendor_name")} for r in self._others(invoice_id, include_later)
+                if normalise_invoice_number(self._effective(r, "invoice_number")) == number]
 
-    def find_earlier_on_po(self, invoice_id, po_number, first_read=False):
-        rows = (r for k, r in self.rows.items() if k != invoice_id) if first_read else self._earlier(invoice_id)
-        return [r for r in rows if po_number and r.get("po_number") == po_number]
+    def find_earlier_on_po(self, invoice_id, po_number, include_later=False):
+        return [r for r in self._others(invoice_id, include_later)
+                if po_number and self._effective(r, "po_number") == po_number]
 
     def start_run(self, invoice_id, trigger, triggered_by, corrections, discrepancies):
         run_id = len(self.runs) + 1
@@ -172,10 +183,11 @@ class FakeRepository:
 
 
 def gemini_reply(messages, **_):
-    """Translation echoes its input, so every number survives. Anything else finds nothing to add."""
+    """Translation echoes the invoice text, so every number survives. Anything else finds nothing to add."""
     prompt = messages[-1]["content"]
     if "translated_text" in prompt:
-        return json.dumps({"detected_language": "xx", "translated_text": prompt, "confidence": 0.95})
+        text = prompt.rsplit("accurate>}", 1)[-1]  # the end of the instructions in prompts.yaml
+        return json.dumps({"detected_language": "xx", "translated_text": text, "confidence": 0.95})
     return json.dumps({"matches": [], "fields": {}})
 
 
@@ -210,7 +222,7 @@ class Pipeline(unittest.TestCase):
     def test_every_sample_gets_its_documented_result(self):
         # Oldest first, as the monitor sees them: the README's table of expected results.
         expected = [("INV_EN_001.pdf", "pdf", "review"), ("INV_EN_002.pdf", "pdf", "approve"),
-                    ("INV_ES_003.pdf", "pdf", "approve"), ("INV_DE_004.pdf", "pdf", "approve"),
+                    ("INV_ES_003.pdf", "pdf", "review"), ("INV_DE_004.pdf", "pdf", "review"),
                     ("INV_EN_005_scan.png", "image", "review"), ("INV_EN_006_malformed.pdf", "pdf", "review"),
                     ("INV_DE_007.docx", "docx", "review"), ("INV_EN_002_scanned.pdf", "pdf", "review")]
         for name, file_type, recommendation in expected:
@@ -315,6 +327,84 @@ class Pipeline(unittest.TestCase):
         with mock.patch.object(llm, "complete", return_value='{"matches": [], "recommendation": "approve"}'):
             invoice_id = self.run_file("INV_EN_002.pdf")
         self.assertEqual(self.repo.rows[invoice_id]["recommendation"], "reject")
+
+    def test_a_translated_invoice_goes_to_a_person_whatever_the_model_claims(self):
+        def claims_perfect_english(messages, **_):
+            reply = json.loads(gemini_reply(messages))
+            if "translated_text" in reply:
+                reply.update(confidence=1.0, detected_language="en")
+            return json.dumps(reply)
+
+        with mock.patch.object(llm, "complete", side_effect=claims_perfect_english):
+            invoice_id = self.run_file("INV_DE_004.pdf")
+            self.assertEqual(self.repo.rows[invoice_id]["recommendation"], "review")
+            workflow.revalidate(invoice_id, "reviewer@example.com")
+        self.assertEqual(self.repo.rows[invoice_id]["recommendation"], "review")
+
+    def test_a_field_the_ai_recovered_stays_in_review_until_a_person_confirms_it(self):
+        parse = workflow.parse_invoice
+        printed = {}
+
+        def number_unread(text, symbols):
+            parsed = parse(text, symbols)
+            printed["number"] = parsed["fields"]["invoice_number"]
+            parsed["fields"]["invoice_number"] = None
+            return parsed
+
+        reply = lambda *_, **__: json.dumps({"matches": [], "fields": {"invoice_number": printed["number"]}})
+        with mock.patch.object(workflow, "parse_invoice", number_unread), \
+                mock.patch.object(llm, "complete", side_effect=reply):
+            invoice_id = self.run_file("INV_EN_002.pdf")
+            row = self.repo.rows[invoice_id]
+            self.assertEqual(row["invoice_number"], printed["number"])
+            self.assertEqual(row["recommendation"], "review", self.messages(invoice_id))
+
+            workflow.revalidate(invoice_id, "reviewer@example.com")
+            self.assertEqual(row["recommendation"], "review", self.messages(invoice_id))
+
+            self.repo.correct(invoice_id, "invoice_number", printed["number"])
+            workflow.revalidate(invoice_id, "reviewer@example.com")
+        self.assertEqual(row["recommendation"], "approve", self.messages(invoice_id))
+
+    def test_a_later_invoice_on_a_corrected_po_is_flagged(self):
+        first = self.run_file("INV_EN_001.pdf")
+        self.repo.correct(first, "po_number", "PO-1002")
+        workflow.revalidate(first, "reviewer@example.com")
+        second = self.run_file("INV_EN_002.pdf")
+        self.assertEqual(self.repo.rows[second]["recommendation"], "review")
+        self.assertIn("was already invoiced by INV_EN_001.pdf", self.messages(second))
+
+    def test_correcting_to_a_po_a_later_invoice_uses_flags_both_on_their_re_checks(self):
+        first, second = self.run_file("INV_EN_001.pdf"), self.run_file("INV_EN_002.pdf")
+        self.repo.correct(first, "po_number", "PO-1002")
+        workflow.revalidate(first, "reviewer@example.com")
+        self.assertIn("was already invoiced by INV_EN_002.pdf", self.messages(first))
+        workflow.revalidate(second, "reviewer@example.com")
+        self.assertIn("was already invoiced by INV_EN_001.pdf", self.messages(second))
+
+    def test_correcting_to_a_number_a_later_invoice_uses_flags_both_on_their_re_checks(self):
+        first, second = self.run_file("INV_EN_001.pdf"), self.run_file("INV_EN_002.pdf")
+        later = self.repo.rows[second]
+        self.repo.correct(first, "invoice_number", later["invoice_number"])
+        self.repo.correct(first, "vendor_name", later["vendor_name"])
+        workflow.revalidate(first, "reviewer@example.com")
+        self.assertIn("already audited from file INV_EN_002.pdf", self.messages(first))
+        workflow.revalidate(second, "reviewer@example.com")
+        self.assertIn("already audited from file INV_EN_001.pdf", self.messages(second))
+
+    def test_correcting_only_the_vendor_finds_a_later_invoice_with_the_same_number(self):
+        first, second = self.run_file("INV_EN_001.pdf"), self.run_file("INV_EN_002.pdf")
+        later = self.repo.rows[second]
+        self.repo.rows[first]["invoice_number"] = later["invoice_number"]  # printed the same, vendor misread
+        self.repo.correct(first, "vendor_name", later["vendor_name"])
+        workflow.revalidate(first, "reviewer@example.com")
+        self.assertIn("already audited from file INV_EN_002.pdf", self.messages(first))
+
+    def test_an_uncorrected_re_check_still_ignores_a_later_copy(self):
+        original = self.run_file("INV_EN_002.pdf")
+        self.run_file("INV_EN_002_scanned.pdf")
+        workflow.revalidate(original, "reviewer@example.com")
+        self.assertEqual(self.repo.rows[original]["recommendation"], "approve", self.messages(original))
 
 
 if __name__ == "__main__":

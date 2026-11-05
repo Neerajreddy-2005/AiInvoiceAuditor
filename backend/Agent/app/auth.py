@@ -36,8 +36,9 @@ def _verify(token: str) -> dict:
     if time.monotonic() < _keys_unavailable_until:
         # During an outage, only tokens signed by a key we already hold may wait on the key set.
         # Others would each hold a worker thread for a fetch that will fail.
-        known = (client.jwk_set_cache.get() or {}).get("keys", []) if client.jwk_set_cache else []
-        if jwt.get_unverified_header(token).get("kid") not in {k.get("kid") for k in known}:
+        cached = client.jwk_set_cache.get() if client.jwk_set_cache else None
+        known = {k.key_id for k in cached.keys} if cached else set()
+        if jwt.get_unverified_header(token).get("kid") not in known:
             raise jwt.PyJWKClientConnectionError("Signing keys are unavailable")
     key = client.get_signing_key_from_jwt(token).key
     return jwt.decode(token, key, algorithms=["ES256"], audience="authenticated", issuer=issuer,

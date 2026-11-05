@@ -85,6 +85,22 @@ class Translation(unittest.TestCase):
         self.assertEqual(translate.numeric_preservation("1000.00", "11000.00"), 0.0)
         self.assertEqual(translate.numeric_preservation("1000.00", "total 1000.00"), 1.0)
 
+    def test_an_added_amount_lowers_the_score(self):
+        self.assertEqual(translate.numeric_preservation("10 20", "10 20 30 40"), 0.5)
+        self.assertEqual(translate.numeric_preservation("10 10", "10"), 0.5)
+        self.assertEqual(translate.numeric_preservation("none", "added 5"), 0.0)
+        self.assertEqual(translate.numeric_preservation("none", "none"), 1.0)
+
+    def test_only_a_result_that_skipped_the_model_counts_as_not_translated(self):
+        self.assertFalse(translate.used_model("not required (langdetect p=0.99)"))
+        self.assertFalse(translate.used_model("empty"))
+        for method in ("gemini", "cache", None):
+            self.assertTrue(translate.used_model(method))
+
+    def test_an_ai_translation_is_reviewed_at_full_confidence(self):
+        self.assertEqual(report.recommend([], 1.0, RULES, ai_translated=True)[0], "review")
+        self.assertEqual(report.recommend([], 1.0, RULES, ai_translated=False)[0], "approve")
+
     def test_uncertain_english_without_a_hint_is_still_translated(self):
         reply = {"translated_text": "hello 5", "confidence": 0.5}
         with mock.patch.object(translate, "detect_language", return_value=("en", 0.86)), \
@@ -156,6 +172,45 @@ class BusinessRules(unittest.TestCase):
         self.assertEqual(result["line_matches"][0]["matched_by"], "llm")
         self.assertIn("manual_review", actions(result))
 
+    def test_every_ai_line_match_reply_gives_the_same_recommendation(self):
+        order = {**PO, "line_items": [
+            PO["line_items"][0],
+            {"line_number": 2, "item_code": "BOLT-9", "description": "Steel bolts M9", "quantity": "100", "unit_price": "900"}]}
+        erp = FakeERP()
+        erp.get_po = lambda _: copy.deepcopy(order)
+        line = {**self.LINE, "item_code": None, "description": "Consulting retainer", "unit_price": "800",
+                "line_total": "80000"}
+        invoice = {**self.INVOICE, "subtotal_amount": "80000", "tax_amount": "14400", "total_amount": "94400"}
+        replies = [{"invoice_line": 1, "po_line": 1, "confidence": 0.9}, {"invoice_line": 1, "po_line": 2, "confidence": 0.9},
+                   {"invoice_line": 1, "po_line": 7, "confidence": 0.9}, {"invoice_line": 1, "po_line": 1, "confidence": 0.1}]
+        for matches in ([[m] for m in replies] + [[]]):
+            with self.subTest(matches), mock.patch.object(validation.llm, "complete_json", return_value={"matches": matches}):
+                found = validation.validate_business(invoice, [line], RULES, erp)["discrepancies"]
+                self.assertEqual(report.recommend(found, 1.0, RULES, False)[0], "review")
+
+    def test_an_exact_code_match_can_still_reject_an_overcharge(self):
+        line = {**self.LINE, "unit_price": "800", "line_total": "80000"}
+        invoice = {**self.INVOICE, "subtotal_amount": "80000", "tax_amount": "14400", "total_amount": "94400"}
+        found = validation.validate_business(invoice, [line], RULES, FakeERP(), use_llm=False)["discrepancies"]
+        self.assertEqual(report.recommend(found, 1.0, RULES, False)[0], "reject")
+
+    def test_recovered_numbers_must_be_whole_printed_tokens(self):
+        text = "Invoice ABC-123/9 on PO 4500123. Payable in USDT"
+        printed = lambda field, value: validation._printed_in_text(field, value, text, RULES["currency_symbol_map"])
+        self.assertTrue(printed("invoice_number", "ABC-123/9"))
+        self.assertTrue(printed("po_number", "4500123"))
+        for fragment in ("c", "123", "ABC-123", "450", "Invoice", "ABC 123"):
+            self.assertFalse(printed("invoice_number", fragment), fragment)
+
+    def test_a_recovered_currency_must_be_an_accepted_code(self):
+        self.assertEqual(workflow._normalise_recovered("currency", "usd"), "USD")
+        for bad in ("USDT", "CAD", "US"):
+            self.assertIsNone(workflow._normalise_recovered("currency", bad), bad)
+
+    def test_a_recovered_field_needs_review(self):
+        result = validation.validate_invoice_data(self.INVOICE, [self.LINE], RULES, recovered_fields={"po_number": "PO-1"})
+        self.assertEqual(actions(result), ["manual_review"])
+
     def test_nan_confidence_is_not_a_match(self):
         for bad in (float("nan"), float("inf")):
             reply = {"matches": [{"invoice_line": 1, "po_line": 1, "confidence": bad}]}
@@ -222,6 +277,22 @@ class Login(unittest.TestCase):
                     auth.current_reviewer(mock.Mock(credentials=self.token()))
                 self.assertEqual(caught.exception.status_code, 503)
         fetch.assert_called_once()
+
+    def test_an_outage_with_keys_cached_still_tells_tokens_apart(self):
+        auth._signing_keys.cache_clear()
+        client = auth._signing_keys()
+        self.addCleanup(setattr, auth, "_keys_unavailable_until", 0.0)
+        with mock.patch.object(client, "fetch_data", return_value={"keys": [self.jwk]}):
+            auth.current_reviewer(mock.Mock(credentials=self.token()))
+        auth._keys_unavailable_until = time.monotonic() + 30
+        unknown = jwt.encode({"sub": "u1"}, self.key, algorithm="ES256", headers={"kid": "someone-else"})
+        with mock.patch.object(client, "fetch_data", side_effect=jwt.PyJWKClientConnectionError("down")) as fetch:
+            self.assertEqual(auth.current_reviewer(mock.Mock(credentials=self.token())), "reviewer@example.com")
+            for token, status in ((unknown, 503), ("not.a.jwt", 401)):
+                with self.assertRaises(main.HTTPException) as caught:
+                    auth.current_reviewer(mock.Mock(credentials=token))
+                self.assertEqual(caught.exception.status_code, status)
+        fetch.assert_not_called()
 
     def test_placeholder_secrets_stop_startup(self):
         with mock.patch.dict(os.environ, {"AGENT_DB_PASSWORD": "change-me-agent"}):
@@ -468,7 +539,7 @@ class Overcharges(unittest.TestCase):
         line = {"line_number": 1, "item_code": "BOLT-8", "description": "Steel bolts M8", "quantity": quantity,
                 "unit_price": price}
         found = validation.validate_business(invoice, [line], RULES, FakeERP(), use_llm=False)["discrepancies"]
-        return report.recommend(found, None, RULES)[0]
+        return report.recommend(found, None, RULES, ai_translated=False)[0]
 
     def test_ordinary_price_differences_stay_with_a_reviewer(self):
         self.assertEqual(self.outcome("100"), "approve")

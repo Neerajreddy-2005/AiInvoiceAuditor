@@ -144,7 +144,8 @@ def _outside_tolerance(actual: Decimal, expected: Decimal, percent: Decimal, rul
 
 
 def validate_invoice_data(invoice: dict, line_items: list[dict], rules: dict,
-                          duplicates: list[dict] | None = None, po_repeats: list[dict] | None = None) -> dict:
+                          duplicates: list[dict] | None = None, po_repeats: list[dict] | None = None,
+                          recovered_fields: dict | None = None) -> dict:
     found: list[dict] = []
     missing: list[str] = []
     required = rules["required_fields"]
@@ -172,6 +173,11 @@ def validate_invoice_data(invoice: dict, line_items: list[dict], rules: dict,
                     action, note = policy(rules, "missing_field"), ""
                 found.append(discrepancy("completeness", field, line_number=n, action=action,
                                          message=f"Line {n}: required field '{field}' is missing{note}"))
+    # A value the AI found is only a suggestion, so it doesn't clear the field until a person confirms it.
+    for field, value in (recovered_fields or {}).items():
+        found.append(discrepancy("completeness", field, action="manual_review", invoice_value=value,
+                                 message=f"The AI read '{field}' from the invoice text as {value}. "
+                                         "Please confirm or correct it"))
 
     # data types
     for field in DECIMAL_FIELDS & set(invoice):
@@ -291,9 +297,18 @@ def recover_missing_fields(text: str, missing: list[str], symbol_map: dict) -> d
     return {"accepted": accepted, "rejected": rejected}
 
 
+# The same token shapes as parsing.FIELD_RULES.
+_NUMBER_TOKENS = {"invoice_number": r"[A-Z0-9][A-Z0-9\-/_.]*", "po_number": r"[A-Z0-9][A-Z0-9\-/_]*"}
+
+
 def _printed_in_text(field: str, value: str, text: str, symbol_map: dict) -> bool:
     folded_text = _fold(text)
-    if field in ("invoice_number", "po_number", "vendor_name"):
+    if field in _NUMBER_TOKENS:
+        if not re.fullmatch(_NUMBER_TOKENS[field], value, re.I) or not re.search(r"\d", value):
+            return False
+        # A whole token: a fragment of a longer number or word doesn't count as printed.
+        return re.search(rf"(?<![\w\-/.]){re.escape(_fold(value))}(?![\w\-/]|\.\w)", folded_text) is not None
+    if field == "vendor_name":
         return _fold(value) in folded_text
     if field == "currency":
         code = value.upper()
@@ -389,9 +404,11 @@ def _check_against_po_value(invoice: dict, line_items: list[dict], matches: list
     subtotal, total, rate = (D(invoice.get(f)) for f in ("subtotal_amount", "total_amount", "tax_rate_pct"))
     reject_percent = Decimal(str(tol["overcharge_reject_percent"]))
     reject_factor = (1 + reject_percent / 100) / price_factor
+    # The allowed value depends on which PO lines the AI picked, so it can't decide a rejection.
+    can_reject = same_currency and not any(m.get("matched_by") == "llm" for m in matches)
 
     def check(amount: Decimal, allowed: Decimal) -> tuple[str, str]:
-        if same_currency and amount > allowed * reject_factor:
+        if can_reject and amount > allowed * reject_factor:
             return policy(rules, "overcharge"), f", and over {_fmt(reject_percent)}% above the PO"
         return policy(rules, "price_mismatch"), ""
 
@@ -502,7 +519,8 @@ def validate_business(invoice: dict, line_items: list[dict], rules: dict, erp, u
         if price is not None and po_price is not None:
             dev = deviation_pct(price, po_price)
             if dev is not None and abs(dev) > price_tol:
-                overcharged = same_currency and dev > reject_percent
+                # An AI-chosen PO line can't decide a rejection, only be shown for a person to weigh.
+                overcharged = same_currency and dev > reject_percent and m["matched_by"] != "llm"
                 found.append(discrepancy(
                     "erp_price", "unit_price", line_number=n,
                     action=policy(rules, "overcharge" if overcharged else "price_mismatch"),

@@ -149,8 +149,11 @@ def fill_recovered_fields(invoice_id: str, recovered: dict, rejected: dict) -> N
             if field in HEADER_COLUMNS:
                 conn.execute(f"UPDATE audit.invoice_audit SET {field} = COALESCE({field}, %s) "
                              "WHERE invoice_id = %s", (value, invoice_id))
-        conn.execute("UPDATE audit.invoice_audit SET extracted_raw = extracted_raw || %s WHERE invoice_id = %s",
-                     (_json({"llm_recovered_fields": recovered, "llm_rejected_fields": rejected}), invoice_id))
+        # A retry may get a different reply. The first value stays in the column, so its marker stays too.
+        conn.execute("UPDATE audit.invoice_audit SET extracted_raw = extracted_raw || %s || jsonb_build_object("
+                     "'llm_recovered_fields', %s || COALESCE(extracted_raw->'llm_recovered_fields', '{}'::jsonb)) "
+                     "WHERE invoice_id = %s",
+                     (_json({"llm_rejected_fields": rejected}), _json(recovered), invoice_id))
 
 
 def set_vendor_id(invoice_id: str, vendor_id: str | None) -> None:
@@ -315,37 +318,51 @@ def run_report(invoice_id: str, run_id: int) -> dict | None:
             "WHERE invoice_id = %s AND run_id = %s", (invoice_id, run_id)).fetchone()
 
 
-def find_same_number(invoice_id: str, normalised_number: str) -> list[dict]:
-    """Earlier invoices with the same number, ignoring case and punctuation.
+def _effective(field: str) -> str:
+    """SQL for a header column of audit.invoice_audit i, with the latest reviewer correction on top.
 
-    Only earlier ones, so re-validating an original never flags it for a later copy.
+    Corrections never change the original columns, so a lookup across invoices has to apply them here.
+    """
+    return ("COALESCE((SELECT f.corrected_value FROM audit.human_feedback f WHERE f.invoice_id = i.invoice_id "
+            f"AND f.feedback_type = 'correction' AND f.field_name = '{field}' AND f.line_number IS NULL "
+            f"ORDER BY f.corrected_at DESC, f.id DESC LIMIT 1), i.{field})")
+
+
+def find_same_number(invoice_id: str, normalised_number: str, include_later: bool = False) -> list[dict]:
+    """Other invoices with the same number, ignoring case and punctuation.
+
+    Earlier ones only unless include_later is set, so re-validating an original never flags it
+    for a later copy. See find_earlier_on_po for when later ones count.
     """
     if not normalised_number:
         return []
     with db.connection() as conn:
         return conn.execute(
-            "SELECT invoice_id::text, file_name, vendor_name, recommendation FROM audit.invoice_audit "
-            "WHERE detected_at < (SELECT detected_at FROM audit.invoice_audit WHERE invoice_id = %s) "
-            "AND regexp_replace(lower(invoice_number), '[^a-z0-9]', '', 'g') = %s "
-            "AND processing_status <> 'unsupported' ORDER BY detected_at",
-            (invoice_id, normalised_number)).fetchall()
+            f"SELECT i.invoice_id::text, i.file_name, {_effective('vendor_name')} AS vendor_name, i.recommendation "
+            "FROM audit.invoice_audit i WHERE i.invoice_id <> %s "
+            "AND (%s OR i.detected_at < (SELECT detected_at FROM audit.invoice_audit WHERE invoice_id = %s)) "
+            f"AND regexp_replace(lower({_effective('invoice_number')}), '[^a-z0-9]', '', 'g') = %s "
+            "AND i.processing_status <> 'unsupported' ORDER BY i.detected_at",
+            (invoice_id, include_later, invoice_id, normalised_number)).fetchall()
 
 
-def find_earlier_on_po(invoice_id: str, po_number: str | None, first_read: bool = False) -> list[dict]:
+def find_earlier_on_po(invoice_id: str, po_number: str | None, include_later: bool = False) -> list[dict]:
     """Earlier invoices billed against the same PO, whatever their invoice number.
 
-    On a first read, a later invoice that already got its PO counts too: this one failed before
-    its PO was read, so that invoice couldn't have seen it. A re-check doesn't count them.
+    Later invoices count on a first read, because this one failed before its PO was read so they
+    couldn't have seen it, and after a correction to the PO, for the same reason. A plain re-check
+    doesn't count them.
     """
     if not po_number:
         return []
     with db.connection() as conn:
         return conn.execute(
-            "SELECT invoice_id::text, file_name FROM audit.invoice_audit "
-            "WHERE invoice_id <> %s AND (%s OR detected_at < (SELECT detected_at FROM audit.invoice_audit "
+            "SELECT i.invoice_id::text, i.file_name FROM audit.invoice_audit i "
+            "WHERE i.invoice_id <> %s AND (%s OR i.detected_at < (SELECT detected_at FROM audit.invoice_audit "
             "WHERE invoice_id = %s)) "
-            "AND upper(po_number) = upper(%s) AND processing_status <> 'unsupported' ORDER BY detected_at",
-            (invoice_id, first_read, invoice_id, po_number)).fetchall()
+            f"AND upper({_effective('po_number')}) = upper(%s) AND i.processing_status <> 'unsupported' "
+            "ORDER BY i.detected_at",
+            (invoice_id, include_later, invoice_id, po_number)).fetchall()
 
 
 def pending_corrections(invoice_id: str) -> list[dict]:

@@ -142,11 +142,12 @@ START ─┬─► extract_pdf ───┐
    everything else labelled goes into `extracted_raw` (JSONB).
 3. **Translation**. Detects the language (langdetect, with the sidecar hint). English is passed
    through at confidence 1.0. Other languages are translated by Gemini and cached in Redis.
-   Confidence = min(model's self-score, share of numbers preserved in the translation).
+   Confidence = min(model's self-score, share of numbers preserved in the translation). It's shown
+   to the reviewer, and a translated invoice always goes to Review.
 4. **Invoice data validation**. Checks required fields, types, accepted currencies and the
    invoice's own arithmetic (line totals, subtotal, tax, total) against `backend/configs/rules.yaml`, and
    flags duplicate invoice numbers. For missing header fields it asks the LLM, but keeps a value
-   only if it is literally printed in the text.
+   only if it is literally printed in the text, and a person must confirm it.
 5. **Business validation**. Calls `mock-erp:8000` over HTTP: PO, vendor, SKU. Lines are matched
    by item code, then by description similarity, then by the LLM. It compares quantity, unit price
    (±5%), currency and tax rate, and writes one discrepancy row per mismatched field with both
@@ -169,14 +170,12 @@ a retry button.
 |---|---|---|
 | INV_EN_001.pdf | Review | SKU-002 unit price 3.50 vs PO 3.00 (+16.7%) |
 | INV_EN_002.pdf | Approve | No item code, matched to PO line by description |
-| INV_ES_003.pdf | Approve* | Spanish, matches PO-1003 |
-| INV_DE_004.pdf | Approve* | German, matches PO-1004 |
+| INV_ES_003.pdf | Review | Spanish, matches PO-1003; a person checks the AI translation |
+| INV_DE_004.pdf | Review | German, matches PO-1004; a person checks the AI translation |
 | INV_EN_005_scan.png | Review | OCR; no currency printed, and tax is stated without a rate, so it stays Review until both are resolved |
 | INV_EN_006_malformed.pdf | Review | Invoice number and currency missing |
 | INV_DE_007.docx | Review | DOCX path; quantity 55 vs PO 60 |
 | INV_EN_002_scanned.pdf | Review | Image-only PDF: shows the OCR fallback (same content as INV_EN_002, different checksum, flagged as duplicate invoice number) |
-
-\* if translation confidence ≥ 0.95, otherwise Review.
 
 ---
 
@@ -388,7 +387,7 @@ A working end-to-end project, run locally with Docker Compose. It uses sample in
 - **Between services:** Mock ERP needs a service token, Qdrant an API key and Redis a password, and placeholder secrets stop startup. Database connections verify the server's certificate.
 - **Uploads:** a private Storage bucket, reached only through the signed-in API. Each file's real type is checked and it gets a random name.
 - **Untrusted files:** parsing runs in a separate process with no secrets, a memory limit and a deadline, and file size, page and pixel limits are enforced.
-- **AI output is never trusted alone:** recommendations come from fixed rules. An AI line match always needs a person to confirm it, and the model never writes SQL.
+- **AI output is never trusted alone:** recommendations come from fixed rules. An AI translation, recovered field or line match always sends the invoice to a person, an AI line match can't cause a rejection, and the model never writes SQL. A recovered amount or PO number can still bring an invoice under a rule that rejects it, and a person makes the final decision either way.
 - **Abuse limits:** per-reviewer rate limits on costly actions and a request size limit in the API.
 - **Dependencies:** pinned in lockfiles and scanned with `pip-audit` and `npm audit`.
 
