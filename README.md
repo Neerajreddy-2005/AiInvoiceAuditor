@@ -27,6 +27,44 @@ An AI-assisted accounts-payable system that reads invoices in several languages,
 - **Security by default:** verified login on every data route, one least-privilege database role per service, row-level security, and untrusted files parsed in a separate process with no secrets and no network sockets.
 - **Containerized and tested:** one command starts five health-checked services, and 110 automated tests include real sample files going through real parsing, OCR and the workflow.
 
+## Evidence: check these claims yourself
+
+Numbers were last checked on 2026-11-05. Every claim below points to the code that enforces it and, where one exists, a test that fails if it breaks.
+
+| Claim | Where it's enforced | Test or proof |
+|---|---|---|
+| **110 automated tests pass** (105 agent, 5 Mock ERP) | [`backend/Agent/tests`](backend/Agent/tests), [`backend/Mock-ERP/tests`](backend/Mock-ERP/tests) | Commands below |
+| **Fixed rules make the recommendation, not the model** | `recommend()` in [`report.py`](backend/Agent/app/report.py), [`rules.yaml`](backend/configs/rules.yaml) | `test_every_sample_gets_its_documented_result` |
+| **An AI translation always goes to a person** | `recommend()` in [`report.py`](backend/Agent/app/report.py) | `test_a_translated_invoice_goes_to_a_person_whatever_the_model_claims` |
+| **Recovered values must be printed in the source** | `_printed_in_text()` in [`validation.py`](backend/Agent/app/validation.py) | `test_recovered_numbers_must_be_whole_printed_tokens`, `test_a_recovered_field_needs_review` |
+| **An AI line match can't clear or cause a rejection** | `_match_lines()` in [`validation.py`](backend/Agent/app/validation.py) | `test_ai_line_match_never_clears_the_finding_on_its_own`, `test_every_ai_line_match_reply_gives_the_same_recommendation` |
+| **The model never writes SQL** | `structured_query()` in [`repository.py`](backend/Agent/app/repository.py): the model only picks a fixed query | Read the function; it has no SQL input from the model |
+| **A failed invoice resumes from the failed stage** | `build_graph()` and `resume()` in [`workflow.py`](backend/Agent/app/workflow.py) | `test_a_failure_is_recorded_and_a_retry_resumes_from_that_stage` |
+| **Reads PDF, Word and scanned files in 3 languages** | [`extraction.py`](backend/Agent/app/extraction.py), `eng+deu+spa` in [`agent.yaml`](backend/configs/agent.yaml), [sample invoices](data/incoming) | `test_every_sample_gets_its_documented_result`, `test_a_scanned_copy_is_read_by_ocr_and_flagged_as_a_duplicate` |
+| **Answers are scored and retried up to 3 attempts** | `reflect_node()` and `rewrite_query()` in [`rag/graph.py`](backend/Agent/app/rag/graph.py), threshold in [`agent.yaml`](backend/configs/agent.yaml) | Shown on each answer in the Ask page; no automated test uses a real model |
+| **Untrusted files are parsed in a limited process** | Seccomp filter and limits in [`extraction.py`](backend/Agent/app/extraction.py) | `test_parsers_cannot_open_network_connections`, `test_real_sample_parses_in_a_child_with_no_secrets`, `test_slow_parser_is_stopped_at_the_deadline` |
+| **The application can't delete audit history** | Grants in [`setup.sql`](backend/Database/supabase/setup.sql), policies in [`setup_rls.sql`](backend/Database/supabase/setup_rls.sql) | [Database checks in section 9](#verifying-it), run against a real database |
+| **Every data route needs a login** | `current_reviewer()` in [`auth.py`](backend/Agent/app/auth.py) | `test_every_route_except_health_requires_login` |
+| **Five health-checked services** | [`compose.yaml`](compose.yaml) | `docker compose ps` |
+| **Works end to end** | [Demo video](docs/demo.mp4), [expected sample results](#expected-results-on-the-sample-invoices) | Sample invoices and a mock ERP only |
+
+**Run the tests** from the repository root. They need no database, Gemini key or network.
+
+```bash
+docker build -t invoice-auditor/agent:1.0 ./backend/Agent
+
+# 105 agent tests
+docker run --rm --network none -v "$PWD/backend/Agent/tests:/app/tests:ro" \
+  -v "$PWD/backend/configs:/app/configs:ro" -v "$PWD/data/incoming:/data/incoming:ro" \
+  invoice-auditor/agent:1.0 python -m unittest discover -s tests
+
+# 5 Mock ERP tests
+docker run --rm --network none -w /mock -v "$PWD/backend/Mock-ERP/app:/mock/app:ro" \
+  -v "$PWD/backend/Mock-ERP/tests:/mock/tests:ro" invoice-auditor/agent:1.0 python -m unittest discover -s tests
+```
+
+**What this doesn't prove:** this is a portfolio project that hasn't been used in production. The tests use stand-ins for the database, ERP and Gemini, so SQL and real AI replies aren't covered by them. There's no CI on this repository, so the tests are run by hand, and there's no measured accuracy figure for the question answering. See [known limitations](#11-known-limitations).
+
 ## Tech stack
 
 | Area | Technologies |
