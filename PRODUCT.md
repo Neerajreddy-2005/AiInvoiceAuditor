@@ -24,7 +24,7 @@ The AI's work is checkable: every recommendation links to the discrepancies, ERP
 
 ## Operating Context
 
-Invoices arrive as PDF, DOCX or image files in a watched folder, some in German, Spanish, French or Vietnamese. Auditors compare the invoice value, the ERP value and the expected value, correct what was misread, re-validate, then decide.
+Invoices arrive as PDF, DOCX or image files, through a signed-in upload or a watched folder, some in German, Spanish, French or Vietnamese. Auditors compare the invoice value, the ERP value and the expected value, correct what was misread, re-validate, then decide.
 
 ## Capabilities and Constraints
 
