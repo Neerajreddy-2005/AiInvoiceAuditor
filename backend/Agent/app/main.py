@@ -328,6 +328,16 @@ LINE_TYPES = {"item_code": "text", "description": "text", "quantity": "decimal",
               "line_total": "decimal"}
 
 
+RECHECK_MAX_SECONDS = 600  # if a re-check never finishes, the invoice can be decided again after this
+_rechecking: dict[str, float] = {}  # invoice id -> when its re-check started. One agent process, so memory is enough.
+_rechecking_lock = threading.Lock()
+
+
+def _being_rechecked(invoice_id: str) -> bool:
+    started = _rechecking.get(invoice_id)
+    return started is not None and time.monotonic() - started < RECHECK_MAX_SECONDS
+
+
 class FeedbackIn(BaseModel):
     feedback_type: Literal["correction", "decision", "comment"] = "correction"
     field_name: str | None = None
@@ -394,6 +404,9 @@ def add_feedback(invoice_id: UUID, body: FeedbackIn, reviewer: str = Depends(rat
         if row["processing_status"] != "completed":
             raise HTTPException(409, "Only fully processed invoices can be decided "
                                      f"(status: {row['processing_status']})")
+        # The new run would cancel this decision without telling anyone, so refuse it now.
+        if _being_rechecked(invoice_id):
+            raise HTTPException(409, "This invoice is being re-checked. Please decide once the new result is ready.")
         latest = repo.latest_run(invoice_id)
         if body.run_number is None:
             raise HTTPException(422, "A decision must say which run it is for")
@@ -415,15 +428,23 @@ def add_feedback(invoice_id: UUID, body: FeedbackIn, reviewer: str = Depends(rat
 
 @api.post("/invoices/{invoice_id}/revalidate", status_code=202)
 def revalidate(invoice_id: UUID, background: BackgroundTasks, reviewer: str = Depends(rate_limited("revalidate"))):
+    invoice = str(invoice_id)
+    with _rechecking_lock:
+        if _being_rechecked(invoice):
+            raise HTTPException(409, "This invoice is already being re-checked.")
+        _rechecking[invoice] = time.monotonic()
+
     def _work():
         try:
-            return workflow.revalidate(str(invoice_id), reviewer)
+            return workflow.revalidate(invoice, reviewer)
         except LookupError as exc:
             raise HTTPException(404, "Invoice not found") from exc
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         except workflow.WorkflowError as exc:
             raise HTTPException(502, "The re-check could not finish. Please try again.") from exc
+        finally:
+            _rechecking.pop(invoice, None)
 
     return _start_job(background, reviewer, _work)
 

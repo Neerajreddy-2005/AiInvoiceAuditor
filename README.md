@@ -25,7 +25,7 @@ An AI-assisted accounts-payable system that reads invoices in several languages,
 - **Guardrails on AI output:** an AI translation, recovered field or line match always sends the invoice to a person, recovered values must be printed in the source, an AI line match can't cause a rejection, and the model never writes SQL.
 - **Human review and audit trail:** click-to-correct figures, re-validation as a new run, and append-only history. The database roles make it impossible for the application to delete audit records.
 - **Security by default:** verified login on every data route, one least-privilege database role per service, row-level security, and untrusted files parsed in a separate process with no secrets and no network sockets.
-- **Containerized and tested:** one command starts five health-checked services, and 107 automated tests include real sample files going through real parsing, OCR and the workflow.
+- **Containerized and tested:** one command starts five health-checked services, and 110 automated tests include real sample files going through real parsing, OCR and the workflow.
 
 ## Tech stack
 
@@ -150,7 +150,7 @@ route ─► sql_answer ──────────────────�
   - Each problem shows invoice, ERP and expected values, a to-scale comparison where the values are numeric, and jumps to its line when clicked. Line items carry check and cross marks.
   - Click any figure to correct it. Each correction is a new `human_feedback` row, and the original stays visible, struck through.
   - **Re-check** layers the latest correction per field over the original extraction and runs validation, business validation, report and index again as a new run.
-  - The decision bar stays on screen. A first decision opens the next undecided invoice; changing an earlier decision stays on the page.
+  - The decision bar stays on screen. A first decision opens the next undecided invoice; changing an earlier decision stays on the page. A decision applies to the latest run, so it's refused while a re-check is running or if the page is out of date.
   - The full report opens in a sandboxed frame. Document text and change history fold out.
 - **Ask**: questions scoped to all invoices or one. Each answer shows linked sources, quality scores and attempts.
 - **Processing log**: every detected file, failures with their stage and error, retry, scan now, rebuild index, service health.
@@ -199,10 +199,10 @@ An AI-assisted source-level security audit confirmed 3 low-severity issues and n
 
 ## 7. Testing
 
-107 automated tests need no database, Gemini access or network:
+110 automated tests need no database, Gemini access or network:
 
 - **Pipeline (18 tests):** real sample files go through real parsing, OCR, language detection, validation, reporting and the LangGraph workflow. The database, ERP, Gemini and search index are stand-ins.
-- **Security and rules (84 tests):** login, API access, rate limits, file handling, prompt handling and business rules.
+- **Security and rules (87 tests):** login, API access, rate limits, file handling, prompt handling and business rules.
 - **Mock ERP (5 tests):** service token and data access.
 
 Run commands are at the top of each file in `backend/Agent/tests/` and `backend/Mock-ERP/tests/`. The full stack was also tested by hand in a browser with a real login.
@@ -352,5 +352,6 @@ Each service has `requirements.txt` (direct dependencies) and `requirements.lock
 - Reviewer corrections feed re-checks and the repeat-billing and duplicate checks, but the invoice list, structured answers and search labels still show values as extracted.
 - Invoice text can still influence AI answers and summaries, and the parsers share the agent's operating-system user.
 - Per-reviewer rate limits are held in memory, so a restart resets them.
+- An invoice list open in another window can show an old decision until it refreshes. Stored data isn't affected.
 - Invoice text is sent to Gemini and stored on Supabase, so check both providers' data terms before using real invoices.
 - A signed-out access token works until it expires, so keep its lifetime short.

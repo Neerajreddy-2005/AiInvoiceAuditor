@@ -445,6 +445,45 @@ class SmallFixes(unittest.TestCase):
         self.assertEqual(self.decide(), (422, 0))
         self.assertEqual(self.decide(run_number=2), (201, 1))
 
+    def test_a_decision_during_a_re_check_is_refused_until_it_ends(self):
+        invoice = "00000000-0000-0000-0000-000000000000"
+        self.addCleanup(main._rechecking.clear)
+        main._rechecking[invoice] = time.monotonic()
+        self.assertEqual(self.decide(run_number=2), (409, 0))
+        main._rechecking[invoice] = time.monotonic() - main.RECHECK_MAX_SECONDS  # one that never finished
+        self.assertEqual(self.decide(run_number=2), (201, 1))
+
+    def test_a_re_check_blocks_decisions_only_while_it_runs_even_if_it_fails(self):
+        invoice = "00000000-0000-0000-0000-000000000000"
+        client = TestClient(main.app, raise_server_exceptions=False)
+        main.app.dependency_overrides[auth.current_reviewer] = lambda: "reviewer@example.com"
+        self.addCleanup(main.app.dependency_overrides.clear)
+        self.addCleanup(main._rechecking.clear)
+        main._recent_calls.clear()
+        seen = []
+
+        def work(invoice_id, _):
+            seen.append(main._being_rechecked(invoice_id))
+            raise RuntimeError("internal detail")
+
+        with mock.patch.object(main.workflow, "revalidate", side_effect=work):
+            self.assertEqual(client.post(f"/invoices/{invoice}/revalidate").status_code, 202)
+        self.assertEqual(seen, [True])
+        self.assertFalse(main._being_rechecked(invoice))
+
+    def test_an_invoice_cant_be_re_checked_twice_at_once(self):
+        invoice = "00000000-0000-0000-0000-000000000000"
+        client = TestClient(main.app, raise_server_exceptions=False)
+        main.app.dependency_overrides[auth.current_reviewer] = lambda: "reviewer@example.com"
+        self.addCleanup(main.app.dependency_overrides.clear)
+        self.addCleanup(main._rechecking.clear)
+        main._recent_calls.clear()
+        main._rechecking[invoice] = time.monotonic()
+        with mock.patch.object(main.workflow, "revalidate") as work:
+            self.assertEqual(client.post(f"/invoices/{invoice}/revalidate").status_code, 409)
+        work.assert_not_called()
+        self.assertTrue(main._being_rechecked(invoice))  # the running one is still tracked
+
     def test_the_sweep_waits_for_a_rebuild(self):
         sweep = monitor_agent.InvoiceMonitor()
         with mock.patch.object(monitor_agent.repo, "unindexed_invoice_ids", return_value=["i"]) as unindexed, \
