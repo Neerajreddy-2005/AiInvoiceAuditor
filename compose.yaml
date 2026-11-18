@@ -153,17 +153,30 @@ services:
 
   # ------------------------------------------------------------------ public demo
   # Off unless .env has COMPOSE_PROFILES=demo. Then each start makes the API public
-  # until the project is stopped, and republishes the Netlify site with the tunnel's
-  # new address. Neither restarts by itself, so a stopped demo stays stopped.
+  # at a fixed Tailscale Funnel address until the project is stopped, and publishes
+  # the Netlify site pointing at it. Funnel reconnects by itself; a stopped demo
+  # stays stopped.
   tunnel:
     profiles: [demo]
-    image: cloudflare/cloudflared:2026.10.7
-    command: [tunnel, --no-autoupdate, --metrics, "0.0.0.0:20241", --url, "http://agent:8000"]
+    image: tailscale/tailscale:v1.104.4
+    hostname: ${TS_HOSTNAME:-invoice-auditor}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_HOSTNAME: ${TS_HOSTNAME:-invoice-auditor}
+      TS_STATE_DIR: /var/lib/tailscale       # kept in a volume, so the address never changes
+      TS_USERSPACE: "true"                   # no extra privileges or /dev/net/tun
+      TS_SERVE_CONFIG: /config/serve.json    # Funnel: public HTTPS -> agent:8000 only
+      TS_ACCEPT_DNS: "false"
+    volumes:
+      - tailscale_state:/var/lib/tailscale
+      - ./demo/tailscale-serve.json:/config/serve.json:ro
     read_only: true
+    tmpfs: [/tmp, /var/run/tailscale]
     cap_drop: [ALL]
     security_opt: [no-new-privileges]
-    mem_limit: 128m
-    pids_limit: 64
+    mem_limit: 256m
+    pids_limit: 128
+    restart: on-failure:5
     depends_on:
       agent:
         condition: service_healthy
@@ -181,6 +194,7 @@ services:
     environment:
       NETLIFY_AUTH_TOKEN: ${NETLIFY_AUTH_TOKEN:-}
       NETLIFY_SITE_ID: ${NETLIFY_SITE_ID:-}
+      DEMO_BACKEND_URL: ${DEMO_BACKEND_URL:-}
     depends_on:
       tunnel:
         condition: service_started
@@ -188,6 +202,7 @@ services:
 
 volumes:
   qdrant_data:      # RAG index (derived; rebuildable from the audit data on Supabase)
+  tailscale_state:  # the demo tunnel's identity, so its public address stays the same
   reports_data:     # generated JSON/HTML report files
 
 networks:

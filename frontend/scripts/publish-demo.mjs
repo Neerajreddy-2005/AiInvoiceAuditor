@@ -1,32 +1,38 @@
-// Runs once each time a public demo starts: asks the tunnel for its new address,
-// then publishes the already-built site with that address. Nothing is saved.
+// Runs once each time a public demo starts: waits until the Tailscale Funnel
+// address answers, then publishes the already-built site pointing at it. The
+// address is fixed, so this republish is the same each time. Nothing is saved.
 import { spawnSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 
-const { NETLIFY_AUTH_TOKEN: token, NETLIFY_SITE_ID: site } = process.env;
+const { NETLIFY_AUTH_TOKEN: token, NETLIFY_SITE_ID: site, DEMO_BACKEND_URL: address } = process.env;
 if (!token || !site) {
   console.log("Not publishing: NETLIFY_AUTH_TOKEN and NETLIFY_SITE_ID aren't both set in .env.");
   process.exit(0);
 }
+if (!/^https:\/\/[a-z0-9-]+\.[a-z0-9-]+\.ts\.net$/.test(address ?? "")) {
+  console.error("DEMO_BACKEND_URL must be the Funnel address, like https://invoice-auditor.tail1234.ts.net");
+  process.exit(1);
+}
 
-async function tunnelHost() {
+async function waitUntilReachable() {
+  // A new Funnel address can take a minute to get its certificate and DNS.
   for (let attempt = 0; attempt < 60; attempt++) {
     try {
-      const { hostname } = await (await fetch("http://tunnel:20241/quicktunnel")).json();
-      if (hostname) return hostname;
+      if ((await fetch(`${address}/health`)).ok) return;
     } catch {
-      // The tunnel is still starting.
+      // Still starting.
     }
-    await sleep(2000);
+    await sleep(5000);
   }
-  throw new Error("The tunnel gave no address.");
+  console.log("The Funnel address isn't answering yet; publishing anyway.");
 }
 
 function run(command, args, env = {}) {
   return spawnSync(command, args, { stdio: "inherit", env: { ...process.env, ...env } }).status === 0;
 }
 
-const backend = `https://${await tunnelHost()}`;
+await waitUntilReachable();
+const backend = address;
 if (!run("node", ["scripts/write-redirects.mjs"], { BACKEND_URL: backend })) process.exit(1);
 
 for (let attempt = 0; attempt < 3; attempt++) {

@@ -78,7 +78,7 @@ docker run --rm --network none -w /mock -v "$PWD/backend/Mock-ERP/app:/mock/app:
 | Document processing | pdfplumber, Tesseract OCR, Poppler, python-docx, langdetect |
 | Data | PostgreSQL on Supabase (row-level security), Qdrant vector database, Redis cache, Supabase Storage |
 | Frontend | React 19, TypeScript, Vite, TanStack Query, React Router, Supabase Auth |
-| Infrastructure | Docker Compose, nginx, Netlify, Cloudflare Tunnel |
+| Infrastructure | Docker Compose, nginx, Netlify, Tailscale Funnel |
 
 ---
 
@@ -112,7 +112,7 @@ docker run --rm --network none -w /mock -v "$PWD/backend/Mock-ERP/app:/mock/app:
 | adk-agents | `aiinvoiceauditor/adk-agents:1.0` | Google ADK `translation_agent` and `reporting_agent` served over A2A on port 8002; stateless, on `adk-net` shared only with the agent |
 | redis | `redis:7.4.12` | Disposable cache (no persistence) |
 
-**Public demo:** the optional `demo` Compose profile adds two services. `tunnel` opens a Cloudflare quick tunnel to the agent, and `publisher` deploys the built frontend to Netlify with that tunnel's address, so the API is reachable only while the demo runs, and login is still required.
+**Public demo:** the optional `demo` Compose profile adds two services. `tunnel` is a Tailscale Funnel that gives the agent a fixed public HTTPS address and reconnects by itself, and `publisher` deploys the built frontend to Netlify pointing at that address. The API is reachable only while the demo runs, and login is still required. The tunnel runs without extra privileges and can reach only the agent.
 
 ### Boundaries are enforced by database privileges, not convention
 
