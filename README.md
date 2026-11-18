@@ -41,7 +41,7 @@ An AI-assisted accounts-payable system that reads invoices in several languages,
 - **Observability:** optional LangFuse tracing of every invoice run and question.
 - **Human review and audit trail:** click-to-correct figures, re-validation as a new run, and append-only history. The database roles make it impossible for the application to delete audit records.
 - **Security by default:** verified login on every data route, one least-privilege database role per service, row-level security, and untrusted files parsed in a separate process with no secrets and no network sockets.
-- **Containerized and tested:** one command starts six health-checked services, and 123 automated tests include real sample files going through real parsing, OCR and the workflow.
+- **Containerized and tested:** one command starts six health-checked services, and 124 automated tests include real sample files going through real parsing, OCR and the workflow.
 
 ## What's new
 
@@ -62,7 +62,7 @@ Numbers were last checked on 2026-11-18. Every claim below points to the code th
 
 | Claim | Where it's enforced | Test or proof |
 |---|---|---|
-| **123 automated tests pass** (118 agent, 5 Mock ERP) | [`backend/Agent/tests`](backend/Agent/tests), [`backend/Mock-ERP/tests`](backend/Mock-ERP/tests) | Commands below |
+| **124 automated tests pass** (119 agent, 5 Mock ERP) | [`backend/Agent/tests`](backend/Agent/tests), [`backend/Mock-ERP/tests`](backend/Mock-ERP/tests) | Commands below |
 | **Fixed rules make the recommendation, not the model** | `recommend()` in [`report.py`](backend/Agent/app/report.py), [`rules.yaml`](backend/configs/rules.yaml) | `test_every_sample_gets_its_documented_result` |
 | **An AI translation always goes to a person** | `recommend()` in [`report.py`](backend/Agent/app/report.py) | `test_a_translated_invoice_goes_to_a_person_whatever_the_model_claims` |
 | **Recovered values must be printed in the source** | `_printed_in_text()` in [`validation.py`](backend/Agent/app/validation.py) | `test_recovered_numbers_must_be_whole_printed_tokens`, `test_a_recovered_field_needs_review` |
@@ -84,12 +84,12 @@ Numbers were last checked on 2026-11-18. Every claim below points to the code th
 
 ## How it was tested
 
-### Automated tests (123 pass)
+### Automated tests (124 pass)
 
 They need no database, Gemini access or network.
 
 - **Pipeline (19 tests):** real sample files go through real parsing, OCR, language detection, validation, reporting and the LangGraph workflow. Every node calls its MCP tool over an in-memory MCP connection. The database, ERP, Gemini and search index are stand-ins. These tests also pass with tracing switched on.
-- **Security and rules (88 tests):** login, API access, rate limits, file handling, prompt handling and business rules.
+- **Security and rules (89 tests):** login, API access, rate limits, file handling, prompt handling and business rules.
 - **Guardrails and keyword router (11 tests):** question screening, prompt-injection detection, card and IBAN masking, and the keyword router.
 - **Mock ERP (5 tests):** service token and data access.
 
@@ -98,7 +98,7 @@ Run them from the repository root:
 ```bash
 docker build -t aiinvoiceauditor/agent:1.0 ./backend/Agent
 
-# 118 agent tests
+# 119 agent tests
 docker run --rm --network none -v "$PWD/backend/Agent/tests:/app/tests:ro" \
   -v "$PWD/backend/configs:/app/configs:ro" -v "$PWD/data/incoming:/data/incoming:ro" \
   aiinvoiceauditor/agent:1.0 python -m unittest discover -s tests

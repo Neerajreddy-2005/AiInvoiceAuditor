@@ -881,5 +881,29 @@ class Models(unittest.TestCase):
         self.assertEqual(llm_cfg["task_models"], {"translation": "gemini/other", "rag_generation": "gemini/strong"})
 
 
+class Tracing(unittest.TestCase):
+    def test_a_failed_model_call_never_sends_its_error_text_to_langfuse(self):
+        from contextlib import contextmanager
+        from app import tracing
+        seen, observation = {}, mock.Mock()
+
+        @contextmanager
+        def start(**_):
+            try:
+                yield observation
+            except Exception as exc:  # what the SDK would record on the span
+                seen["exception"] = exc
+                raise
+
+        with mock.patch.object(tracing, "enabled", return_value=True), \
+                mock.patch.object(tracing, "get_client", create=True,
+                                  return_value=mock.Mock(start_as_current_observation=start)):
+            with self.assertRaisesRegex(RuntimeError, "key=secret"):  # the caller still gets the error
+                with tracing.generation("chat", "model", []):
+                    raise RuntimeError("POST https://example.invalid/?key=secret failed")
+        self.assertNotIn("exception", seen)
+        observation.update.assert_called_with(level="ERROR", status_message="RuntimeError")
+
+
 if __name__ == "__main__":
     unittest.main()

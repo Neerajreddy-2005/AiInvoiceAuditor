@@ -65,13 +65,21 @@ def generation(name: str, model: str, prompt, as_type: str = "generation"):
     if not enabled():
         yield lambda output, usage=None: None
         return
+    failure = None
     with get_client().start_as_current_observation(name=name, as_type=as_type, model=model, input=prompt) as obs:
         def record(output, usage=None):
             details = {k: int(v) for k, v in {
                 "input": getattr(usage, "prompt_tokens", None),
                 "output": getattr(usage, "completion_tokens", None)}.items() if v is not None}
             obs.update(output=output, usage_details=details or None)
-        yield record
+        try:
+            yield record
+        except Exception as exc:
+            # Only the type: provider errors can include the request URL, and Gemini's carries the API key.
+            obs.update(level="ERROR", status_message=type(exc).__name__)
+            failure = exc
+    if failure is not None:
+        raise failure  # after the span closes, so the raw message is never recorded on it
 
 
 def mcp_meta() -> dict | None:
