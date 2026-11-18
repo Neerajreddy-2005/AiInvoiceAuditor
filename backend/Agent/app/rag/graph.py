@@ -223,12 +223,12 @@ def answer_query(question: str, invoice_id: str | None = None) -> dict:
                 "attempts": [], "cached": False}
     if _graph is None:
         _graph = build_graph()
-    tracing.name_trace("rag-query", invoice_id=invoice_id)
     key = cache.make_key("rag", ANSWER_FORMAT, question.lower(), invoice_id, store.point_count(), repo.last_indexed_at())
     cached = cache.get_json(key)
     if cached:
         return {**cached, "cached": True}
-    out = _graph.invoke({"question": question, "invoice_id": invoice_id}, {"recursion_limit": 40})
+    with tracing.attributes(invoice_id=invoice_id):
+        out = _graph.invoke({"question": question, "invoice_id": invoice_id}, {"recursion_limit": 40})
     final = _redact(out["final"])
     if final["route"] == "rag" and final["passed"]:
         cache.set_json(key, final, agent_config()["cache"]["rag_answer_ttl_seconds"])

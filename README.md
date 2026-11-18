@@ -196,13 +196,13 @@ route ─► sql_answer ──────────────────�
 - **MCP (tools):** the agent serves 11 tools on `127.0.0.1:8100/mcp/` inside its container: `invoice-watcher`, `data-harvester`, `lang-bridge`, `data-completeness-checker`, `business-validation`, `insight-reporter`, `vector-indexer`, `semantic-retriever`, `chunk-ranker`, `response-synthesizer` and `rag-evaluator`. The port is never published, so the frontend and the demo tunnel can't reach it. Workflow and RAG nodes call the tools over MCP. Tools compute and return JSON, and the nodes persist, so every audit write stays in the nodes. `invoice-watcher` is read-only. `GET /agents` (login required) lists the A2A cards, MCP tools and tracing status, and the Processing log shows them in the "Agents and tools" panel.
 - **Guardrails:** a question is refused before any model call if it is empty, over 1000 characters or looks like prompt injection, and its route is `guardrail`. Invoice text that addresses the AI adds an `rai_guardrail` discrepancy, which sends the invoice to manual review and never to auto-approval. IBANs and Luhn-valid card numbers are masked in answers and sources, and the personas tell the model that document text is data.
 - **Keyword fallback:** if the router model is unavailable, a keyword router answers count, list, total and discrepancy questions from SQL, and why or explain questions go to RAG.
-- **LangFuse tracing (optional):** off when the keys are empty. It records one trace per invoice run and per question, with node spans, MCP tool spans nested through MCP `_meta`, LiteLLM generations and RAG Triad scores.
+- **LangFuse tracing (optional):** off when the keys are empty. It records one trace per invoice run and per question, with node spans, MCP tool spans nested through MCP `_meta`, Gemini generations and embeddings with token usage, and RAG Triad scores. It uses the OpenTelemetry-based LangFuse SDK (v5), which is what LangFuse Cloud accepts.
 
 To turn tracing on:
 
 1. Create a free LangFuse Cloud account (Hobby plan) and a project.
 2. Copy the project's public and secret keys.
-3. Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` in `.env`. For the US region, also set `LANGFUSE_HOST=https://us.cloud.langfuse.com`.
+3. Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` in `.env`. Outside the EU region, also set `LANGFUSE_HOST` (or `LANGFUSE_BASE_URL`) to the address your project uses, such as `https://us.cloud.langfuse.com`.
 4. Run `docker compose up -d` again and check that `GET /agents` shows tracing as on.
 
 Traces include invoice text and prompts, and LangFuse stores them, so use sample invoices only.
@@ -430,7 +430,6 @@ Each service has `requirements.txt` (direct dependencies) and `requirements.lock
 - Per-reviewer rate limits are held in memory, so a restart resets them.
 - An invoice list open in another window can show an old decision until it refreshes. Stored data isn't affected.
 - Invoice text is sent to Gemini and stored on Supabase, so check both providers' data terms before using real invoices.
-- Gemini calls made inside the adk-agents container aren't traced, only the agent-side span.
+- Calls to the ADK agents are traced from the agent's side (prompt and reply), without token usage.
 - With LangFuse enabled, invoice text and prompts go to LangFuse Cloud, so check its data terms before using real invoices.
-- The langfuse v2 SDK pins `packaging` to 24.2.
 - A signed-out access token works until it expires, so keep its lifetime short.

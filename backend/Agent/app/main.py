@@ -88,6 +88,7 @@ async def lifespan(_: FastAPI):
     yield
     monitor.stop()
     mcp.should_exit = True
+    tracing.flush()
     db.close()
 
 

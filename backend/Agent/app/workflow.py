@@ -311,19 +311,19 @@ def init() -> None:
 @tracing.traced("invoice-workflow")
 def _invoke(invoice_id: str, state: dict | None, thread_id: str, mark_failure: bool = True) -> dict:
     config = {"configurable": {"thread_id": thread_id}}
-    tracing.name_trace("invoice-workflow", session_id=thread_id, invoice_id=invoice_id)
-    try:
-        return _graph.invoke(state, config)
-    except Exception as exc:
-        stage = None
+    with tracing.attributes(session_id=thread_id, invoice_id=invoice_id):
         try:
-            stage = ",".join(_graph.get_state(config).next) or None
-        except Exception:
-            pass
-        log.error("Workflow for %s failed at %s: %s", invoice_id, stage, exc)
-        if mark_failure:
-            repo.mark_failed(invoice_id, stage, f"{type(exc).__name__}: {exc}")
-        raise WorkflowError(stage, exc) from exc
+            return _graph.invoke(state, config)
+        except Exception as exc:
+            stage = None
+            try:
+                stage = ",".join(_graph.get_state(config).next) or None
+            except Exception:
+                pass
+            log.error("Workflow for %s failed at %s: %s", invoice_id, stage, exc)
+            if mark_failure:
+                repo.mark_failed(invoice_id, stage, f"{type(exc).__name__}: {exc}")
+            raise WorkflowError(stage, exc) from exc
 
 
 def _initial_state(invoice_id: str, file_name: str, file_path: str, file_type: str,

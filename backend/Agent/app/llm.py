@@ -96,9 +96,12 @@ def _count_call() -> None:
 def _completion(model: str, messages: list[dict], temperature: float, max_tokens: int, task: str | None) -> str:
     cfg = agent_config()["llm"]
     try:
-        response = litellm.completion(
-            model=model, messages=messages, temperature=temperature, max_tokens=max_tokens,
-            timeout=cfg["timeout_seconds"], num_retries=cfg["num_retries"], metadata=tracing.llm_metadata(task))
+        with tracing.generation(task or "chat", model, messages) as record:
+            response = litellm.completion(
+                model=model, messages=messages, temperature=temperature, max_tokens=max_tokens,
+                timeout=cfg["timeout_seconds"], num_retries=cfg["num_retries"])
+            content = response.choices[0].message.content or ""
+            record(content, getattr(response, "usage", None))
     except Exception as exc:  # LiteLLM raises provider-specific exception types
         error = _safe_error(exc)
         if model == cfg["chat_model"]:
@@ -108,7 +111,7 @@ def _completion(model: str, messages: list[dict], temperature: float, max_tokens
         log.warning("Task model %s failed (%s); using %s", model, error[:200], cfg["chat_model"])
         _count_call()
         return _completion(cfg["chat_model"], messages, temperature, max_tokens, task)
-    return response.choices[0].message.content or ""
+    return content
 
 
 def complete(messages: list[dict], *, task: str | None = None, agent: str | None = None,
@@ -125,7 +128,9 @@ def complete(messages: list[dict], *, task: str | None = None, agent: str | None
     content = None
     if agent and a2a_client.configured():
         try:
-            content = a2a_client.send(agent, messages[-1]["content"])
+            with tracing.generation(task or agent, f"adk:{agent}_agent", messages[-1]["content"]) as record:
+                content = a2a_client.send(agent, messages[-1]["content"])
+                record(content)
         except a2a_client.A2AError as exc:
             log.warning("ADK %s agent unavailable (%s); calling Gemini in-process", agent, exc)
             _count_call()  # the remote agent may already have used a call
@@ -172,8 +177,9 @@ def embed(text: str) -> list[float]:
         return hit
     _count_call()
     try:
-        response = litellm.embedding(model=model, input=[text], timeout=cfg["llm"]["timeout_seconds"],
-                                     metadata=tracing.llm_metadata("embedding"))
+        with tracing.generation("embedding", model, text, as_type="embedding") as record:
+            response = litellm.embedding(model=model, input=[text], timeout=cfg["llm"]["timeout_seconds"])
+            record(None, getattr(response, "usage", None))
     except Exception as exc:
         raise LLMError(f"Gemini embedding call to {model} failed: {_safe_error(exc)}") from None
     item = response.data[0]
