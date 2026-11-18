@@ -1,0 +1,4 @@
+# Agents (Google ADK, native Gemini through google-genai) + A2A server
+google-adk[a2a]==2.11.0
+uvicorn==0.54.0
+pyyaml==6.0.3

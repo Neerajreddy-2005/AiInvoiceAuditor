@@ -25,15 +25,17 @@ An AI-assisted accounts-payable system that reads invoices in several languages,
 - **Guardrails on AI output:** an AI translation, recovered field or line match always sends the invoice to a person, recovered values must be printed in the source, an AI line match can't cause a rejection, and the model never writes SQL.
 - **Human review and audit trail:** click-to-correct figures, re-validation as a new run, and append-only history. The database roles make it impossible for the application to delete audit records.
 - **Security by default:** verified login on every data route, one least-privilege database role per service, row-level security, and untrusted files parsed in a separate process with no secrets and no network sockets.
-- **Containerized and tested:** one command starts five health-checked services, and 110 automated tests include real sample files going through real parsing, OCR and the workflow.
+- **Agents across frameworks:** the LangGraph pipeline calls its tools over MCP (11 tools), and translation and reporting run as Google ADK agents in their own container, reached over A2A.
+- **Observability and guardrails:** optional LangFuse tracing, questions screened before the model, invoice text that tries to instruct the AI sent to a person, and card and IBAN numbers masked in answers.
+- **Containerized and tested:** one command starts six health-checked services, and 123 automated tests include real sample files going through real parsing, OCR and the workflow.
 
 ## Evidence: check these claims yourself
 
-Numbers were last checked on 2026-11-05. Every claim below points to the code that enforces it and, where one exists, a test that fails if it breaks.
+Numbers were last checked on 2026-11-18. Every claim below points to the code that enforces it and, where one exists, a test that fails if it breaks.
 
 | Claim | Where it's enforced | Test or proof |
 |---|---|---|
-| **110 automated tests pass** (105 agent, 5 Mock ERP) | [`backend/Agent/tests`](backend/Agent/tests), [`backend/Mock-ERP/tests`](backend/Mock-ERP/tests) | Commands below |
+| **123 automated tests pass** (118 agent, 5 Mock ERP) | [`backend/Agent/tests`](backend/Agent/tests), [`backend/Mock-ERP/tests`](backend/Mock-ERP/tests) | Commands below |
 | **Fixed rules make the recommendation, not the model** | `recommend()` in [`report.py`](backend/Agent/app/report.py), [`rules.yaml`](backend/configs/rules.yaml) | `test_every_sample_gets_its_documented_result` |
 | **An AI translation always goes to a person** | `recommend()` in [`report.py`](backend/Agent/app/report.py) | `test_a_translated_invoice_goes_to_a_person_whatever_the_model_claims` |
 | **Recovered values must be printed in the source** | `_printed_in_text()` in [`validation.py`](backend/Agent/app/validation.py) | `test_recovered_numbers_must_be_whole_printed_tokens`, `test_a_recovered_field_needs_review` |
@@ -43,34 +45,36 @@ Numbers were last checked on 2026-11-05. Every claim below points to the code th
 | **Reads PDF, Word and scanned files in 3 languages** | [`extraction.py`](backend/Agent/app/extraction.py), `eng+deu+spa` in [`agent.yaml`](backend/configs/agent.yaml), [sample invoices](data/incoming) | `test_every_sample_gets_its_documented_result`, `test_a_scanned_copy_is_read_by_ocr_and_flagged_as_a_duplicate` |
 | **Answers are scored and retried up to 3 attempts** | `reflect_node()` and `rewrite_query()` in [`rag/graph.py`](backend/Agent/app/rag/graph.py), threshold in [`agent.yaml`](backend/configs/agent.yaml) | Shown on each answer in the Ask page; no automated test uses a real model |
 | **Untrusted files are parsed in a limited process** | Seccomp filter and limits in [`extraction.py`](backend/Agent/app/extraction.py) | `test_parsers_cannot_open_network_connections`, `test_real_sample_parses_in_a_child_with_no_secrets`, `test_slow_parser_is_stopped_at_the_deadline` |
-| **The application can't delete audit history** | Grants in [`setup.sql`](backend/Database/supabase/setup.sql), policies in [`setup_rls.sql`](backend/Database/supabase/setup_rls.sql) | [Database checks in section 9](#verifying-it), run against a real database |
+| **The application can't delete audit history** | Grants in [`setup.sql`](backend/Database/supabase/setup.sql), policies in [`setup_rls.sql`](backend/Database/supabase/setup_rls.sql) | [Database checks in section 10](#verifying-it), run against a real database |
 | **Every data route needs a login** | `current_reviewer()` in [`auth.py`](backend/Agent/app/auth.py) | `test_every_route_except_health_requires_login` |
-| **Five health-checked services** | [`compose.yaml`](compose.yaml) | `docker compose ps` |
+| **An invoice that instructs the AI goes to a person** | `check_data()` in [`workflow.py`](backend/Agent/app/workflow.py), [`guardrails.py`](backend/Agent/app/guardrails.py) | `test_an_invoice_that_instructs_the_ai_goes_to_a_person`, [`test_guardrails.py`](backend/Agent/tests/test_guardrails.py) |
+| **MCP tools aren't publicly reachable** | `HOST` in [`mcp_server.py`](backend/Agent/app/mcp_server.py) binds to 127.0.0.1 inside the container, with no published port | `curl 127.0.0.1:8000/mcp/` returns 404 |
+| **Six health-checked services** | [`compose.yaml`](compose.yaml) | `docker compose ps` |
 | **Works end to end** | [Demo video](docs/demo.mp4), [expected sample results](#expected-results-on-the-sample-invoices) | Sample invoices and a mock ERP only |
 
 **Run the tests** from the repository root. They need no database, Gemini key or network.
 
 ```bash
-docker build -t invoice-auditor/agent:1.0 ./backend/Agent
+docker build -t aiinvoiceauditor/agent:1.0 ./backend/Agent
 
-# 105 agent tests
+# 118 agent tests
 docker run --rm --network none -v "$PWD/backend/Agent/tests:/app/tests:ro" \
   -v "$PWD/backend/configs:/app/configs:ro" -v "$PWD/data/incoming:/data/incoming:ro" \
-  invoice-auditor/agent:1.0 python -m unittest discover -s tests
+  aiinvoiceauditor/agent:1.0 python -m unittest discover -s tests
 
 # 5 Mock ERP tests
 docker run --rm --network none -w /mock -v "$PWD/backend/Mock-ERP/app:/mock/app:ro" \
-  -v "$PWD/backend/Mock-ERP/tests:/mock/tests:ro" invoice-auditor/agent:1.0 python -m unittest discover -s tests
+  -v "$PWD/backend/Mock-ERP/tests:/mock/tests:ro" aiinvoiceauditor/agent:1.0 python -m unittest discover -s tests
 ```
 
-**What this doesn't prove:** this is a portfolio project that hasn't been used in production. The tests use stand-ins for the database, ERP and Gemini, so SQL and real AI replies aren't covered by them. There's no CI on this repository, so the tests are run by hand, and there's no measured accuracy figure for the question answering. See [known limitations](#11-known-limitations).
+**What this doesn't prove:** this is a portfolio project that hasn't been used in production. The tests use stand-ins for the database, ERP and Gemini, so SQL and real AI replies aren't covered by them. There's no CI on this repository, so the tests are run by hand, and there's no measured accuracy figure for the question answering. See [known limitations](#12-known-limitations).
 
 ## Tech stack
 
 | Area | Technologies |
 |---|---|
 | Backend | Python 3.11, FastAPI, Pydantic, Uvicorn |
-| AI and agents | LangGraph, LangChain text splitters, LiteLLM, Google Gemini (chat and embeddings), RAG with RAG Triad scoring |
+| AI and agents | LangGraph, Google ADK, A2A, MCP, LangChain text splitters, LiteLLM, Google Gemini (chat and embeddings), RAG with RAG Triad scoring, LangFuse tracing (optional) |
 | Document processing | pdfplumber, Tesseract OCR, Poppler, python-docx, langdetect |
 | Data | PostgreSQL on Supabase (row-level security), Qdrant vector database, Redis cache, Supabase Storage |
 | Frontend | React 19, TypeScript, Vite, TanStack Query, React Router, Supabase Auth |
@@ -90,18 +94,22 @@ docker run --rm --network none -w /mock -v "$PWD/backend/Mock-ERP/app:/mock/app:
  │                                  ├──► Supabase         langgraph + audit schemas       │
  │                                  ├──► qdrant   :6333   RAG index (derived)             │
  │                                  ├──► redis    :6379   LLM / translation cache         │
+ │                                  ├──► adk-agents :8002 (A2A; own network adk-net)      │
+ │                                  │      ADK translation + reporting agents             │
+ │                                  ├──► MCP tools 127.0.0.1:8100 (inside the agent only) │
  │                                  └──► Gemini API (outside the network, via LiteLLM)    │
  │  frontend :3000 (nginx) ──/api──► agent :8000; login with Supabase Auth                │
  └──────────────────────────────────────────────────────────────────────────────────────┘
-   host ports (127.0.0.1 only): agent 8000, mock-erp 8001→8000, frontend 3000, qdrant 6333 (redis has no host port and only the agent can reach it)
+   host ports (127.0.0.1 only): agent 8000, mock-erp 8001→8000, frontend 3000, qdrant 6333 (redis and adk-agents have no host port, and only the agent can reach them)
 ```
 
 | Service | Image | Responsibility |
 |---|---|---|
-| agent | `invoice-auditor/agent:1.0` | Monitor, extraction, translation, validation, reporting and RAG agents, and the API for the UI |
-| mock-erp | `invoice-auditor/mock-erp:1.0` | `GET /po/{po}`, `/vendor/{id}`, `/sku/{code}` from the `erp` schema, with a service token |
-| frontend | `invoice-auditor/frontend:1.0` | Auditor UI; proxies `/api` to the agent |
+| agent | `aiinvoiceauditor/agent:1.0` | Monitor, extraction, translation, validation, reporting and RAG agents, and the API for the UI |
+| mock-erp | `aiinvoiceauditor/mock-erp:1.0` | `GET /po/{po}`, `/vendor/{id}`, `/sku/{code}` from the `erp` schema, with a service token |
+| frontend | `aiinvoiceauditor/frontend:1.0` | Auditor UI; proxies `/api` to the agent |
 | qdrant | `qdrant/qdrant:v1.20.0` | Vector index (named volume) |
+| adk-agents | `aiinvoiceauditor/adk-agents:1.0` | Google ADK `translation_agent` and `reporting_agent` served over A2A on port 8002; stateless, on `adk-net` shared only with the agent |
 | redis | `redis:7.4.12` | Disposable cache (no persistence) |
 
 **Public demo:** the optional `demo` Compose profile adds two services. `tunnel` opens a Cloudflare quick tunnel to the agent, and `publisher` deploys the built frontend to Netlify with that tunnel's address, so the API is reachable only while the demo runs, and login is still required.
@@ -123,6 +131,8 @@ So the agent *cannot* bypass the mock-erp API, the browser never touches the dat
 |---|---|
 | Translation, field recovery, line matching, report summary, RAG generation, RAG reflection, query routing | `gemini-3.5-flash-lite` |
 | Embeddings (Qdrant collection: 3072 dims, cosine) | `gemini-embedding-001` |
+
+Each task's model is set under `llm.task_models` in `agent.yaml`, and all of them are `gemini-3.5-flash-lite` now. If a task's model fails, that call falls back to `chat_model`, and `CHAT_MODEL` in `.env` moves every task still on the default. The ADK agents read the same `agent.yaml` and `prompts.yaml`.
 
 This build uses the Gemini API free tier so that it runs at no cost, with a daily call limit so nothing can use up the quota. Model IDs are configuration (`backend/configs/agent.yaml`, or `.env` overrides), and LiteLLM makes the provider replaceable. Changing the embedding model may also mean changing `embedding_dimensions` and recreating the Qdrant collection.
 
@@ -180,7 +190,26 @@ route ─► sql_answer ──────────────────�
 
 ---
 
-## 4. Human review frontend
+## 4. Agents, tools and tracing
+
+- **A2A (agent to agent):** translation and reporting are Google ADK agents (`translation_agent`, `reporting_agent`) in the `adk-agents` container, using Gemini natively through google-genai. They are served over A2A (protocol v1.0, JSON-RPC `SendMessage`) on port 8002, with no host port, on `adk-net`, which only the agent shares. They are stateless. The agent caches every reply in Redis, counts each call toward the daily Gemini limit, and falls back to an in-process LiteLLM call if the container is down.
+- **MCP (tools):** the agent serves 11 tools on `127.0.0.1:8100/mcp/` inside its container: `invoice-watcher`, `data-harvester`, `lang-bridge`, `data-completeness-checker`, `business-validation`, `insight-reporter`, `vector-indexer`, `semantic-retriever`, `chunk-ranker`, `response-synthesizer` and `rag-evaluator`. The port is never published, so the frontend and the demo tunnel can't reach it. Workflow and RAG nodes call the tools over MCP. Tools compute and return JSON, and the nodes persist, so every audit write stays in the nodes. `invoice-watcher` is read-only. `GET /agents` (login required) lists the A2A cards, MCP tools and tracing status, and the Processing log shows them in the "Agents and tools" panel.
+- **Guardrails:** a question is refused before any model call if it is empty, over 1000 characters or looks like prompt injection, and its route is `guardrail`. Invoice text that addresses the AI adds an `rai_guardrail` discrepancy, which sends the invoice to manual review and never to auto-approval. IBANs and Luhn-valid card numbers are masked in answers and sources, and the personas tell the model that document text is data.
+- **Keyword fallback:** if the router model is unavailable, a keyword router answers count, list, total and discrepancy questions from SQL, and why or explain questions go to RAG.
+- **LangFuse tracing (optional):** off when the keys are empty. It records one trace per invoice run and per question, with node spans, MCP tool spans nested through MCP `_meta`, LiteLLM generations and RAG Triad scores.
+
+To turn tracing on:
+
+1. Create a free LangFuse Cloud account (Hobby plan) and a project.
+2. Copy the project's public and secret keys.
+3. Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` in `.env`. For the US region, also set `LANGFUSE_HOST=https://us.cloud.langfuse.com`.
+4. Run `docker compose up -d` again and check that `GET /agents` shows tracing as on.
+
+Traces include invoice text and prompts, and LangFuse stores them, so use sample invoices only.
+
+---
+
+## 5. Human review frontend
 
 - **Invoices**: how many invoices need a decision, money held per currency, decision progress, and a proportional Reject / Review / Approve strip that also filters. A searchable vendor menu shows recently used vendors first, then all vendors with the most flagged first. Each row shows why it was flagged, and hovering shows its problems. Keyboard: `/` search, `J` and `K` move, `Enter` opens.
 - **Review**:
@@ -196,7 +225,7 @@ route ─► sql_answer ──────────────────�
 
 ---
 
-## 5. Data placement
+## 6. Data placement
 
 | Store | Holds | Survives `down` | Survives `down -v` |
 |---|---|---|---|
@@ -219,7 +248,7 @@ If the Qdrant volume is lost, the agent detects an empty collection on startup a
 
 ---
 
-## 6. Security
+## 7. Security
 
 - **Login:** every API route except a bare `/health` needs a Supabase login, verified against the project's public signing keys, and only accounts in `REVIEWER_EMAILS` are accepted. The reviewer recorded on each change comes from the verified token. Public sign-up is off.
 - **Least privilege:** each service has its own database role and secrets. Row-level security is on, the application can't delete from the audit trail, and browser API roles get no access to the data.
@@ -235,19 +264,20 @@ An AI-assisted source-level security audit confirmed 3 low-severity issues and n
 
 ---
 
-## 7. Testing
+## 8. Testing
 
-110 automated tests need no database, Gemini access or network:
+123 automated tests need no database, Gemini access or network:
 
-- **Pipeline (18 tests):** real sample files go through real parsing, OCR, language detection, validation, reporting and the LangGraph workflow. The database, ERP, Gemini and search index are stand-ins.
-- **Security and rules (87 tests):** login, API access, rate limits, file handling, prompt handling and business rules.
+- **Pipeline (19 tests):** real sample files go through real parsing, OCR, language detection, validation, reporting and the LangGraph workflow. The database, ERP, Gemini and search index are stand-ins.
+- **Guardrails and routing (11 tests):** question screening, prompt-injection detection, card and IBAN masking, and the keyword router.
+- **Security and rules (88 tests):** login, API access, rate limits, file handling, prompt handling and business rules.
 - **Mock ERP (5 tests):** service token and data access.
 
 Run commands are at the top of each file in `backend/Agent/tests/` and `backend/Mock-ERP/tests/`. The full stack was also tested by hand in a browser with a real login.
 
 ---
 
-## 8. Design decisions
+## 9. Design decisions
 
 - **Why a checksum, not a filename?** Vendors rename files, and the same invoice can arrive twice. The content hash is the identity, and the UNIQUE constraint makes the claim atomic.
 - **Why an audit schema when LangGraph already checkpoints?** Checkpoints are serialized working memory for resuming a workflow, and they can be pruned. The audit trail is a typed, indexed business record that is never pruned. ("Show every rejected invoice from vendor X last month" is a SQL query; it can't be answered from msgpack blobs.)
@@ -264,7 +294,7 @@ Run commands are at the top of each file in `backend/Agent/tests/` and `backend/
 
 ---
 
-## 9. Run it yourself
+## 10. Run it yourself
 
 Prerequisites: Docker Desktop (Compose v2), a Supabase project, and a free Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey). The free tier has rate limits. Google may use free-tier data to improve its products, and people may read it, so use sample invoices only.
 
@@ -274,7 +304,7 @@ Prerequisites: Docker Desktop (Compose v2), a Supabase project, and a free Gemin
 cp .env.example .env            # then edit .env: Supabase values, role passwords, GEMINI_API_KEY,
                                 # REVIEWER_EMAILS and the three generated service secrets
 docker compose up --build -d
-docker compose ps               # wait until all five services show (healthy)
+docker compose ps               # wait until all six services show (healthy)
 ```
 
 | Open | URL |
@@ -299,9 +329,12 @@ To turn uploads on, create a **private** Supabase Storage bucket named `invoices
 | `AGENT_DB_USER` / `_PASSWORD` | agent | Role that writes `audit` and creates tables in `langgraph` |
 | `ERP_DB_USER` / `_PASSWORD` | mock-erp | Read-only role on the `erp` schema |
 | `GEMINI_API_KEY` | agent | Gemini API via LiteLLM |
-| `CHAT_MODEL`, `EMBED_MODEL` | agent | Optional model overrides (e.g. `gemini/gemini-3.5-flash-lite`) |
+| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` | agent | Optional tracing (see section 4) |
+| `CHAT_MODEL`, `EMBED_MODEL` | agent, adk-agents (`CHAT_MODEL` only) | Optional model overrides (e.g. `gemini/gemini-3.5-flash-lite`) |
 
 Role passwords are set when `setup.sql` runs. To change one later, run `ALTER ROLE ... PASSWORD` in the Supabase SQL Editor and update `.env`.
+
+The LangFuse keys (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, optional `LANGFUSE_HOST`) are optional. Leave them empty to run without tracing.
 
 `.env` is excluded by `.gitignore` and by every `.dockerignore`, and is only passed to containers at runtime, each service getting only the variables listed for it in `compose.yaml`. Never commit it.
 
@@ -310,7 +343,7 @@ Role passwords are set when `setup.sql` runs. To change one later, run `ALTER RO
 ```bash
 # 1. Single-command startup
 docker compose up --build -d
-docker compose ps                         # five services, all (healthy)
+docker compose ps                         # six services, all (healthy)
 
 # 2. End-to-end processing
 docker compose logs -f agent              # extract → translate → validate → report → index
@@ -328,7 +361,7 @@ docker compose up -d
 #   the audit trail is intact, and the agent rebuilds the search index from it on startup
 
 # 5. No secrets in images
-docker history invoice-auditor/agent:1.0 --no-trunc
+docker history aiinvoiceauditor/agent:1.0 --no-trunc
 
 # 6. Mock ERP refuses a request with no service token
 docker compose exec agent python -c "import httpx; print(httpx.get('http://mock-erp:8000/po/PO-1001').status_code)"   # 401
@@ -343,10 +376,10 @@ docker compose exec agent python -c "import psycopg; from app.settings import se
 
 ---
 
-## 10. Repository layout
+## 11. Repository layout
 
 ```
-compose.yaml                 five services plus the optional demo profile, volumes, networks, health checks
+compose.yaml                 six services plus the optional demo profile, volumes, networks, health checks
 .env.example                 configuration template (copy to .env)
 backend/
   configs/
@@ -367,9 +400,14 @@ backend/
     app/validation.py        data + business validation agents
     app/report.py            reporting agent (+ templates/report.html.j2)
     app/workflow.py          LangGraph invoice workflow + checkpointer
+    app/mcp_server.py        the 11 MCP tools (loopback only), app/mcp_client.py calls them
+    app/a2a_client.py        calls the ADK agents over A2A, with cache and LiteLLM fallback
+    app/guardrails.py        question screening, injection detection, PII masking
+    app/tracing.py           optional LangFuse tracing
     app/rag/                 indexing, retrieval, augmentation, generation, reflection, graph
     app/repository.py        all audit-schema SQL
     tests/                   pipeline and security tests
+  ADK-Agents/                adk-agents image (Google ADK translation and reporting agents over A2A)
   Mock-ERP/                  mock-erp image (FastAPI over erp schema) and its tests
   certs/                     Supabase CA, for verifying database connections
 frontend/                    React + Vite + TypeScript auditor UI, nginx config, Netlify config, demo publishing script
@@ -382,7 +420,7 @@ Each service has `requirements.txt` (direct dependencies) and `requirements.lock
 
 ---
 
-## 11. Known limitations
+## 12. Known limitations
 
 - It uses sample invoices and a mock ERP, and the public demo runs from one computer. A real deployment would need its own hosting and security review.
 - The test suite uses stand-ins, so SQL and real AI replies aren't covered by automated tests.
@@ -392,4 +430,7 @@ Each service has `requirements.txt` (direct dependencies) and `requirements.lock
 - Per-reviewer rate limits are held in memory, so a restart resets them.
 - An invoice list open in another window can show an old decision until it refreshes. Stored data isn't affected.
 - Invoice text is sent to Gemini and stored on Supabase, so check both providers' data terms before using real invoices.
+- Gemini calls made inside the adk-agents container aren't traced, only the agent-side span.
+- With LangFuse enabled, invoice text and prompts go to LangFuse Cloud, so check its data terms before using real invoices.
+- The langfuse v2 SDK pins `packaging` to 24.2.
 - A signed-out access token works until it expires, so keep its lifetime short.

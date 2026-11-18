@@ -5,7 +5,9 @@
         ├─► extract_image ─┘                      ▲
         └─► (revalidate) ─────────────────────────┘
 
-Every node persists its own output to the audit schema. If a node fails
+Each node calls its tool over MCP (app.mcp_server; the helpers below are
+what those tools run) and persists the result to the audit schema, so all
+audit writes stay in the nodes. If a node fails
 (Gemini throttled, mock-erp down), the invoice is marked failed and the
 next attempt resumes from the failed node using the checkpoint, so OCR
 and translation are never repeated.
@@ -24,7 +26,7 @@ from typing import TypedDict
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
 
-from . import db, llm
+from . import db, guardrails, llm, mcp_client, tracing
 from . import report as reporting
 from . import repository as repo
 from . import storage
@@ -33,9 +35,9 @@ from .extraction import extract, file_sha256
 from .parsing import parse_invoice, parse_number
 from .rag import indexing
 from .settings import rules, settings
-from .translate import translate, used_model
-from .validation import (normalise_invoice_number, recover_missing_fields, same_vendor, validate_business,
-                         validate_invoice_data)
+from .translate import used_model
+from .validation import (discrepancy, normalise_invoice_number, recover_missing_fields, same_vendor,
+                         validate_business, validate_invoice_data)
 
 log = logging.getLogger(__name__)
 
@@ -96,39 +98,50 @@ def _local_file(file_path: str):
         yield local
 
 
+def harvest(file_path: str, kind: str) -> dict:
+    """The data-harvester tool: read a local file (in a limited child process) and parse it."""
+    result = extract(Path(file_path), kind)
+    parsed = parse_invoice(result.text, rules().get("currency_symbol_map"))
+    extras = {**parsed["extras"], "extraction": {"pages": result.pages, "ocr_pages": result.ocr_pages}}
+    return {"raw_text": result.text, "extraction_method": result.method, "fields": parsed["fields"],
+            "line_items": parsed["line_items"], "extras": extras}
+
+
 def _extract(state: InvoiceState, kind: str) -> dict:
     # The audit trail records one checksum, so it must describe the content audited here.
     claimed = repo.get_invoice(state["invoice_id"])["file_checksum"]
     with _local_file(state["file_path"]) as local:
         if file_sha256(local) != claimed:
             raise ValueError("The file changed after it was detected")
-        result = extract(local, kind)
-    parsed = parse_invoice(result.text, rules().get("currency_symbol_map"))
-    extras = {**parsed["extras"], "extraction": {"pages": result.pages, "ocr_pages": result.ocr_pages}}
-    repo.save_extraction(state["invoice_id"], method=result.method, raw_text=result.text,
-                         fields=parsed["fields"], line_items=parsed["line_items"], extras=extras)
-    return {"raw_text": result.text, "extraction_method": result.method,
-            "invoice": parsed["fields"], "line_items": parsed["line_items"]}
+        result = mcp_client.call("data-harvester", file_path=str(local), file_type=kind)
+    repo.save_extraction(state["invoice_id"], method=result["extraction_method"], raw_text=result["raw_text"],
+                         fields=result["fields"], line_items=result["line_items"], extras=result["extras"])
+    return {"raw_text": result["raw_text"], "extraction_method": result["extraction_method"],
+            "invoice": result["fields"], "line_items": result["line_items"]}
 
 
+@tracing.traced("extract_pdf")
 def extract_pdf(state: InvoiceState) -> dict:
     return _extract(state, "pdf")
 
 
+@tracing.traced("extract_docx")
 def extract_docx(state: InvoiceState) -> dict:
     return _extract(state, "docx")
 
 
+@tracing.traced("extract_image")
 def extract_image(state: InvoiceState) -> dict:
     return _extract(state, "image")
 
 
+@tracing.traced("translate")
 def translate_node(state: InvoiceState) -> dict:
     hint = (state.get("email_metadata") or {}).get("language")
     # The sidecar comes from outside: only a short language code may reach the prompt.
     if not (isinstance(hint, str) and re.fullmatch(r"[A-Za-z-]{2,8}", hint)):
         hint = None
-    result = translate(state["raw_text"], hint)
+    result = mcp_client.call("lang-bridge", text=state["raw_text"], language_hint=hint)
     details = {k: v for k, v in result.items() if k not in ("translated_text",)}
     repo.save_translation(state["invoice_id"], source_language=result["source_language"],
                           translated_text=result["translated_text"], confidence=result["confidence"],
@@ -148,6 +161,27 @@ def _normalise_recovered(field: str, value: str) -> str | None:
     return value
 
 
+def check_data(invoice_id: str, invoice: dict, line_items: list[dict], document_text: str,
+               recovered_fields: dict, corrected: list[str], first_read: bool) -> dict:
+    """The data-completeness-checker tool: rules.yaml checks, duplicates and the injection guardrail."""
+    corrected = set(corrected)
+    same_number = repo.find_same_number(invoice_id, normalise_invoice_number(invoice.get("invoice_number")),
+                                        include_later=first_read or bool(corrected & {"invoice_number", "vendor_name"}))
+    duplicates = [d for d in same_number if same_vendor(invoice.get("vendor_name"), d["vendor_name"], rules())]
+    po_repeats = repo.find_earlier_on_po(invoice_id, invoice.get("po_number"),
+                                         include_later=first_read or "po_number" in corrected)
+    result = validate_invoice_data(invoice, line_items, rules(), duplicates, po_repeats, recovered_fields)
+    hits = guardrails.find_injection(document_text)
+    if hits:
+        # Never auto-approved: a person reads what the document asked the AI to do.
+        result["discrepancies"].append(discrepancy(
+            "rai_guardrail", "document_text", action="manual_review", invoice_value=hits[0][:200],
+            message=f'The document contains text that looks like an instruction to the AI ("{hits[0][:80]}"), '
+                    "so a person must review it"))
+    return result
+
+
+@tracing.traced("validate_data")
 def validate_data(state: InvoiceState) -> dict:
     invoice = dict(state["invoice"])
     first_read = state.get("mode") != "revalidate"
@@ -165,21 +199,25 @@ def validate_data(state: InvoiceState) -> dict:
             except llm.LLMError as exc:
                 log.warning("Missing-field recovery skipped: %s", exc)
 
-    corrected = {c["field"] for c in state.get("corrections_applied") or []}
-    same_number = repo.find_same_number(state["invoice_id"], normalise_invoice_number(invoice.get("invoice_number")),
-                                        include_later=first_read or bool(corrected & {"invoice_number", "vendor_name"}))
-    duplicates = [d for d in same_number if same_vendor(invoice.get("vendor_name"), d["vendor_name"], rules())]
-    po_repeats = repo.find_earlier_on_po(state["invoice_id"], invoice.get("po_number"),
-                                         include_later=first_read or "po_number" in corrected)
-    result = validate_invoice_data(invoice, state["line_items"], rules(), duplicates, po_repeats, recovered_fields)
+    corrected = sorted({c["field"] for c in state.get("corrections_applied") or []})
+    document_text = f"{state.get('raw_text') or ''}\n{state.get('translated_text') or ''}"
+    result = mcp_client.call("data-completeness-checker", invoice_id=state["invoice_id"], invoice=invoice,
+                             line_items=state["line_items"], document_text=document_text,
+                             recovered_fields=recovered_fields, corrected=corrected, first_read=first_read)
     run_id, run_number = repo.start_run(state["invoice_id"], state["trigger"], state.get("triggered_by"),
                                         state.get("corrections_applied") or [], result["discrepancies"])
     return {"invoice": invoice, "run_id": run_id, "run_number": run_number,
             "discrepancies": result["discrepancies"], "missing_fields": result["missing_fields"]}
 
 
+def check_business(invoice: dict, line_items: list[dict]) -> dict:
+    """The business-validation tool: compare with the ERP (mock-erp HTTP API)."""
+    return validate_business(invoice, line_items, rules(), erp_client())
+
+
+@tracing.traced("validate_business")
 def validate_business_node(state: InvoiceState) -> dict:
-    result = validate_business(state["invoice"], state["line_items"], rules(), erp_client())
+    result = mcp_client.call("business-validation", invoice=state["invoice"], line_items=state["line_items"])
     repo.insert_discrepancies(state["run_id"], state["invoice_id"], result["discrepancies"])
     if state.get("mode") != "revalidate":
         repo.set_vendor_id(state["invoice_id"], result["vendor_id"])
@@ -187,21 +225,29 @@ def validate_business_node(state: InvoiceState) -> dict:
             "line_matches": result["line_matches"]}
 
 
-def report_node(state: InvoiceState) -> dict:
+REPORT_FIELDS = ("invoice_id", "run_number", "trigger", "triggered_by", "file_name", "extraction_method", "invoice",
+                 "line_items", "source_language", "translation_confidence", "discrepancies", "missing_fields")
+
+
+def build_audit_report(audit: dict, ai_translated: bool) -> dict:
+    """The insight-reporter tool: rule-based recommendation, report, AI summary and HTML."""
     recommendation, status, reasons = reporting.recommend(
-        state["discrepancies"], state.get("translation_confidence"), rules(),
-        state.get("ai_translated", True))  # a checkpoint from before this field existed: don't assume English
-    report = reporting.build_report(
-        invoice_id=state["invoice_id"], run_number=state["run_number"], trigger=state["trigger"],
-        triggered_by=state.get("triggered_by"), file_name=state["file_name"],
-        extraction_method=state.get("extraction_method"), invoice=state["invoice"],
-        line_items=state["line_items"], source_language=state.get("source_language"),
-        translation_confidence=state.get("translation_confidence"), discrepancies=state["discrepancies"],
-        missing_fields=state["missing_fields"], recommendation=recommendation, validation_status=status,
-        reasons=reasons, line_matches=state.get("line_matches") or [],
-        corrections_applied=state.get("corrections_applied") or [])
+        audit["discrepancies"], audit.get("translation_confidence"), rules(), ai_translated)
+    report = reporting.build_report(**audit, recommendation=recommendation, validation_status=status,
+                                    reasons=reasons)
     report["summary"] = reporting.summarize(report)
-    html = reporting.render_html(report)
+    return {"report": report, "html": reporting.render_html(report)}
+
+
+@tracing.traced("report")
+def report_node(state: InvoiceState) -> dict:
+    audit = {k: state.get(k) for k in REPORT_FIELDS}
+    audit["line_matches"] = state.get("line_matches") or []
+    audit["corrections_applied"] = state.get("corrections_applied") or []
+    # A checkpoint from before ai_translated existed: don't assume English.
+    out = mcp_client.call("insight-reporter", audit=audit, ai_translated=state.get("ai_translated", True))
+    report, html = out["report"], out["html"]
+    recommendation, status = report["recommendation"], report["validation_status"]
     try:
         json_path, html_path = reporting.write_files(report, html, settings().reports_dir)
     except OSError as exc:
@@ -214,11 +260,12 @@ def report_node(state: InvoiceState) -> dict:
     return {"recommendation": recommendation, "validation_status": status}
 
 
+@tracing.traced("index")
 def index_node(state: InvoiceState) -> dict:
     # Indexing is derived data; a failure here leaves indexed_at NULL and is
     # retried by the monitor's index sweep instead of failing the audit.
     try:
-        indexing.index_invoice(state["invoice_id"])
+        mcp_client.call("vector-indexer", invoice_id=state["invoice_id"])
     except Exception as exc:
         log.error("Indexing invoice %s failed (will retry): %s", state["invoice_id"], exc)
     return {}
@@ -261,8 +308,10 @@ def init() -> None:
     _graph = build_graph(_saver)
 
 
+@tracing.traced("invoice-workflow")
 def _invoke(invoice_id: str, state: dict | None, thread_id: str, mark_failure: bool = True) -> dict:
     config = {"configurable": {"thread_id": thread_id}}
+    tracing.name_trace("invoice-workflow", session_id=thread_id, invoice_id=invoice_id)
     try:
         return _graph.invoke(state, config)
     except Exception as exc:

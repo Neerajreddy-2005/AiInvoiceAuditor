@@ -1,107 +1,393 @@
 aiohappyeyeballs==2.7.1
+    # via aiohttp
 aiohttp==3.14.5
+    # via litellm
 aiosignal==1.4.0
+    # via aiohttp
 annotated-doc==0.0.5
+    # via fastapi
 annotated-types==0.8.0
+    # via pydantic
 anyio==4.16.0
+    # via
+    #   httpx
+    #   httpx2
+    #   langfuse
+    #   langsmith
+    #   mcp
+    #   openai
+    #   sse-starlette
+    #   starlette
+async-timeout==5.0.1
+    # via redis
 attrs==26.1.0
+    # via
+    #   aiohttp
+    #   jsonschema
+    #   referencing
+backoff==2.2.1
+    # via langfuse
 boto3==1.43.123
+    # via
+    #   -r backend/Agent/requirements.txt
+    #   litellm
 botocore==1.43.123
+    # via
+    #   boto3
+    #   s3transfer
 certifi==2026.10.23
+    # via
+    #   httpcore
+    #   httpx
+    #   langchain-core
+    #   litellm
+    #   requests
 cffi==2.1.1
+    # via cryptography
 charset-normalizer==3.5.2
+    # via
+    #   pdfminer-six
+    #   requests
 click==8.5.0
+    # via
+    #   huggingface-hub
+    #   litellm
+    #   uvicorn
 cryptography==50.0.2
+    # via
+    #   pdfminer-six
+    #   pyjwt
 distro==1.9.0
+    # via
+    #   langsmith
+    #   openai
 fastapi==0.162.0
+    # via -r backend/Agent/requirements.txt
 fastuuid==0.14.0
+    # via litellm
 filelock==4.2.8
+    # via huggingface-hub
 frozenlist==1.8.0
+    # via
+    #   aiohttp
+    #   aiosignal
 fsspec==2026.9.0
+    # via huggingface-hub
 grpcio==1.85.1
+    # via qdrant-client
 h11==0.16.0
+    # via
+    #   httpcore
+    #   httpcore2
+    #   uvicorn
 h2==4.4.1
+    # via httpx
 hf-xet==1.8.0
+    # via huggingface-hub
 hpack==4.2.0
+    # via h2
 httpcore==1.0.9
+    # via httpx
 httpcore2==2.16.0
+    # via httpx2
 httpx==0.28.1
+    # via
+    #   -r backend/Agent/requirements.txt
+    #   langchain-core
+    #   langfuse
+    #   langgraph-sdk
+    #   litellm
+    #   mcp
+    #   openai
+    #   qdrant-client
+httpx-sse==0.4.3
+    # via mcp
 httpx2==2.16.0
+    # via
+    #   huggingface-hub
+    #   langsmith
 huggingface-hub==2.4.0
+    # via tokenizers
 hyperframe==6.1.0
+    # via h2
 idna==3.20
+    # via
+    #   anyio
+    #   httpx
+    #   httpx2
+    #   langfuse
+    #   requests
+    #   yarl
 importlib-metadata==8.9.0
+    # via litellm
 jinja2==3.1.6
+    # via
+    #   -r backend/Agent/requirements.txt
+    #   litellm
 jiter==0.18.0
+    # via openai
 jmespath==1.1.0
+    # via
+    #   boto3
+    #   botocore
 jsonpatch==1.41
+    # via langchain-core
 jsonpointer==3.8
+    # via jsonpatch
 jsonschema==4.26.0
+    # via
+    #   litellm
+    #   mcp
 jsonschema-specifications==2025.9.1
+    # via jsonschema
 langchain-core==1.7.4
+    # via
+    #   -r backend/Agent/requirements.txt
+    #   langchain-text-splitters
+    #   langgraph
+    #   langgraph-checkpoint
+    #   langgraph-prebuilt
+    #   langgraph-sdk
 langchain-protocol==0.0.20
+    # via
+    #   langchain-core
+    #   langgraph-sdk
 langchain-text-splitters==1.1.3
+    # via -r backend/Agent/requirements.txt
 langdetect==1.0.9
+    # via -r backend/Agent/requirements.txt
+langfuse==2.60.10
+    # via -r backend/Agent/requirements.txt
 langgraph==1.2.19
+    # via -r backend/Agent/requirements.txt
 langgraph-checkpoint==4.3.1
+    # via
+    #   langgraph
+    #   langgraph-checkpoint-postgres
+    #   langgraph-prebuilt
 langgraph-checkpoint-postgres==3.2.0
+    # via -r backend/Agent/requirements.txt
 langgraph-prebuilt==1.1.1
+    # via langgraph
 langgraph-sdk==0.4.12
+    # via langgraph
 langsmith==0.14.17
+    # via langchain-core
 litellm==1.103.10
+    # via -r backend/Agent/requirements.txt
 lxml==6.1.3
+    # via python-docx
 markupsafe==3.0.4
+    # via jinja2
+mcp==1.30.0
+    # via -r backend/Agent/requirements.txt
 multidict==7.2.1
+    # via
+    #   aiohttp
+    #   yarl
 numpy==2.4.6
+    # via qdrant-client
 openai==2.54.0
+    # via litellm
 opentelemetry-api==1.45.2
+    # via fastapi
 orjson==3.13.0
+    # via
+    #   langgraph-checkpoint-postgres
+    #   langgraph-sdk
+    #   langsmith
 ormsgpack==1.13.0
-packaging==26.3
+    # via langgraph-checkpoint
+packaging==24.2
+    # via
+    #   huggingface-hub
+    #   langchain-core
+    #   langfuse
+    #   langsmith
+    #   pytesseract
 pdf2image==1.17.0
+    # via -r backend/Agent/requirements.txt
 pdfminer-six==20260107
+    # via pdfplumber
 pdfplumber==0.11.10
+    # via -r backend/Agent/requirements.txt
 pillow==13.0.0
+    # via
+    #   -r backend/Agent/requirements.txt
+    #   pdf2image
+    #   pdfplumber
+    #   pytesseract
 portalocker==3.2.0
+    # via qdrant-client
 propcache==0.5.4
+    # via
+    #   aiohttp
+    #   yarl
 protobuf==7.36.2
+    # via qdrant-client
 psycopg==3.3.8
+    # via
+    #   -r backend/Agent/requirements.txt
+    #   langgraph-checkpoint-postgres
 psycopg-binary==3.3.8
+    # via psycopg
 psycopg-pool==3.3.3
+    # via
+    #   -r backend/Agent/requirements.txt
+    #   langgraph-checkpoint-postgres
 pycparser==3.12
+    # via cffi
 pydantic==2.14.2
+    # via
+    #   -r backend/Agent/requirements.txt
+    #   fastapi
+    #   langchain-core
+    #   langfuse
+    #   langgraph
+    #   langsmith
+    #   litellm
+    #   mcp
+    #   openai
+    #   pydantic-settings
+    #   qdrant-client
 pydantic-core==2.50.2
+    # via pydantic
 pydantic-settings==2.16.2
+    # via
+    #   litellm
+    #   mcp
 pyjwt==2.15.1
+    # via
+    #   -r backend/Agent/requirements.txt
+    #   mcp
 pypdfium2==5.14.0
+    # via pdfplumber
 pytesseract==0.3.13
+    # via -r backend/Agent/requirements.txt
 python-dateutil==2.9.0.post0
+    # via botocore
 python-docx==1.2.0
+    # via -r backend/Agent/requirements.txt
 python-dotenv==1.2.4
+    # via
+    #   litellm
+    #   pydantic-settings
+python-multipart==0.0.34
+    # via mcp
 pyyaml==6.0.3
+    # via
+    #   -r backend/Agent/requirements.txt
+    #   huggingface-hub
+    #   langchain-core
 qdrant-client==1.20.0
+    # via -r backend/Agent/requirements.txt
 redis==8.1.0
+    # via -r backend/Agent/requirements.txt
 referencing==0.37.0
+    # via
+    #   jsonschema
+    #   jsonschema-specifications
 regex==2026.9.29
+    # via tiktoken
 requests==2.34.2
+    # via
+    #   langfuse
+    #   langsmith
+    #   requests-toolbelt
+    #   tiktoken
 requests-toolbelt==1.0.0
+    # via langsmith
 rpds-py==2026.9.1
+    # via
+    #   jsonschema
+    #   referencing
 s3transfer==0.19.3
+    # via boto3
 six==1.17.0
+    # via
+    #   langdetect
+    #   python-dateutil
 sniffio==1.3.1
+    # via
+    #   langsmith
+    #   openai
+sse-starlette==3.7.0
+    # via mcp
 starlette==1.10.0
+    # via
+    #   fastapi
+    #   mcp
+    #   sse-starlette
 tenacity==9.2.1
+    # via langchain-core
 tiktoken==0.14.0
+    # via litellm
 tokenizers==0.23.3
+    # via litellm
 tqdm==4.70.1
+    # via
+    #   huggingface-hub
+    #   openai
 truststore==0.10.5
+    # via
+    #   httpcore2
+    #   httpx2
 typing-extensions==4.16.0
+    # via
+    #   aiohttp
+    #   aiosignal
+    #   anyio
+    #   fastapi
+    #   grpcio
+    #   httpx2
+    #   huggingface-hub
+    #   langchain-core
+    #   langchain-protocol
+    #   langsmith
+    #   mcp
+    #   openai
+    #   opentelemetry-api
+    #   psycopg
+    #   psycopg-pool
+    #   pydantic
+    #   pydantic-core
+    #   pydantic-settings
+    #   python-docx
+    #   referencing
+    #   starlette
+    #   typing-inspection
 typing-inspection==0.4.4
+    # via
+    #   fastapi
+    #   mcp
+    #   pydantic
+    #   pydantic-settings
 urllib3==2.8.0
+    # via
+    #   botocore
+    #   qdrant-client
+    #   requests
 uuid-utils==0.19.0
+    # via
+    #   langchain-core
+    #   langsmith
 uvicorn==0.54.0
+    # via
+    #   -r backend/Agent/requirements.txt
+    #   mcp
 websockets==17.4
+    # via
+    #   langgraph-sdk
+    #   langsmith
+wrapt==1.17.3
+    # via langfuse
 xxhash==4.0.2
+    # via
+    #   langgraph
+    #   langsmith
 yarl==1.25.1
+    # via aiohttp
 zipp==4.1.2
+    # via importlib-metadata
 zstandard==0.25.0
+    # via langsmith

@@ -6,6 +6,11 @@
               ▲                                         ├─ attempt 3 ──► finalize (best attempt, flagged)
               └──────────── rewrite_query ◄─────────────┘  otherwise
 
+Questions pass a guardrail first (app.guardrails), and IBANs and card
+numbers are masked in what is returned. retrieve, augment, generate and
+reflect call their MCP tools. If the router model is unavailable, a
+keyword router still sends obvious count / list / total questions to SQL.
+
 A repeated question is answered from Redis (rag:{sha256}) without
 calling the model; the key includes the index size and the latest
 indexing time, so new invoices and re-validations invalidate it.
@@ -16,14 +21,11 @@ from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from .. import cache, llm
+from .. import cache, guardrails, llm, mcp_client, tracing
 from .. import repository as repo
 from ..settings import agent_config
 from . import store
-from .augmentation import build_context, rerank
-from .generation import generate
-from .reflection import evaluate
-from .retrieval import retrieve
+from .keyword_router import keyword_route
 
 log = logging.getLogger(__name__)
 SQL_INTENTS = {"list_invoices", "count_invoices", "sum_totals", "invoice_discrepancies"}
@@ -52,16 +54,18 @@ def _cfg() -> dict:
     return agent_config()["rag"]
 
 
+@tracing.traced("route_question")
 def route_question(state: RAGState) -> dict:
     base = {"search_query": state["question"], "attempt": 1, "attempts": []}
     if state.get("invoice_id"):
         return {**base, "route": "rag"}
     try:
         decision = llm.complete_json(llm.prompt_messages("query_router", question=state["question"],
-                                                         today=date.today().isoformat()), max_tokens=300)
+                                                         today=date.today().isoformat()),
+                                     task="query_router", max_tokens=300)
     except llm.LLMError as exc:
-        log.warning("Router unavailable (%s); using RAG", exc)
-        decision = {}
+        decision = keyword_route(state["question"])
+        log.warning("Router unavailable (%s); keyword route: %s", exc, decision.get("intent") or "rag")
     if decision.get("route") == "sql" and decision.get("intent") in SQL_INTENTS:
         also_asked = decision.get("also_asked")
         return {**base, "route": "sql", "intent": decision["intent"], "filters": decision.get("filters") or {},
@@ -96,6 +100,7 @@ def _notes(state: RAGState, rows: list[dict]) -> list[str]:
     return notes
 
 
+@tracing.traced("sql_answer")
 def sql_answer(state: RAGState) -> dict:
     try:
         columns, rows = repo.structured_query(state["intent"], state.get("filters") or {})
@@ -108,26 +113,31 @@ def sql_answer(state: RAGState) -> dict:
                       "scores": None, "attempts": [], "sources": []}}
 
 
+@tracing.traced("retrieve")
 def retrieve_node(state: RAGState) -> dict:
     cfg = _cfg()
     top_k = cfg["top_k"] + (state["attempt"] - 1) * cfg["top_k_step"]
-    return {"hits": retrieve(state["search_query"], top_k=top_k, invoice_id=state.get("invoice_id"))}
+    return mcp_client.call("semantic-retriever", query=state["search_query"], top_k=top_k,
+                           invoice_id=state.get("invoice_id"))
 
 
+@tracing.traced("augment")
 def augment_node(state: RAGState) -> dict:
     query = state["question"] if state["search_query"] == state["question"] \
         else f"{state['question']} {state['search_query']}"
-    ranked = rerank(query, state["hits"], _cfg()["rerank_keep"])
-    context, sources = build_context(ranked)
-    return {"context": context, "sources": sources}
+    return mcp_client.call("chunk-ranker", question=query, hits=state["hits"], keep=_cfg()["rerank_keep"])
 
 
+@tracing.traced("generate")
 def generate_node(state: RAGState) -> dict:
-    return {"answer": generate(state["question"], state["context"])}
+    return mcp_client.call("response-synthesizer", question=state["question"], context=state["context"])
 
 
+@tracing.traced("reflect")
 def reflect_node(state: RAGState) -> dict:
-    scores = evaluate(state["question"], state["context"], state["answer"])
+    scores = mcp_client.call("rag-evaluator", question=state["question"], context=state["context"],
+                             answer=state["answer"])
+    tracing.score(scores)
     attempt = {"attempt": state["attempt"], "query": state["search_query"], "answer": state["answer"],
                "scores": scores, "sources": state["sources"]}
     log.info("RAG attempt %s scored %.3f", state["attempt"], scores["average"])
@@ -143,11 +153,12 @@ def after_reflect(state: RAGState) -> str:
     return "rewrite_query"
 
 
+@tracing.traced("rewrite_query")
 def rewrite_query(state: RAGState) -> dict:
     try:
         result = llm.complete_json(llm.prompt_messages("query_rewrite", question=state["question"],
                                                        feedback=state["scores"].get("feedback", "")),
-                                   max_tokens=200)
+                                   task="query_rewrite", max_tokens=200)
         query = str(result.get("query") or state["question"])
     except llm.LLMError:
         query = state["question"]
@@ -195,17 +206,30 @@ def build_graph():
 _graph = None
 
 
+def _redact(final: dict) -> dict:
+    """Answers and excerpts are shown to people and cached, so IBANs and card numbers are masked first."""
+    sources = [{**s, **{k: guardrails.redact_pii(s[k]) for k in ("excerpt", "chunk_text") if isinstance(s.get(k), str)}}
+               for s in final.get("sources") or []]
+    return {**final, "answer": guardrails.redact_pii(final.get("answer") or ""), "sources": sources}
+
+
+@tracing.traced("rag-query")
 def answer_query(question: str, invoice_id: str | None = None) -> dict:
     global _graph
+    question = question.strip()
+    refused = guardrails.check_question(question)
+    if refused:
+        return {"route": "guardrail", "answer": refused, "passed": False, "scores": None, "sources": [],
+                "attempts": [], "cached": False}
     if _graph is None:
         _graph = build_graph()
-    question = question.strip()
+    tracing.name_trace("rag-query", invoice_id=invoice_id)
     key = cache.make_key("rag", ANSWER_FORMAT, question.lower(), invoice_id, store.point_count(), repo.last_indexed_at())
     cached = cache.get_json(key)
     if cached:
         return {**cached, "cached": True}
     out = _graph.invoke({"question": question, "invoice_id": invoice_id}, {"recursion_limit": 40})
-    final = out["final"]
+    final = _redact(out["final"])
     if final["route"] == "rag" and final["passed"]:
         cache.set_json(key, final, agent_config()["cache"]["rag_answer_ttl_seconds"])
     return {**final, "cached": False}

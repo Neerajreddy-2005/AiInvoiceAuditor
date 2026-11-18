@@ -280,7 +280,7 @@ def recover_missing_fields(text: str, missing: list[str], symbol_map: dict) -> d
     if not wanted or not text.strip():
         return {"accepted": {}, "rejected": {}}
     result = llm.complete_json(llm.prompt_messages(
-        "field_recovery", missing_fields=", ".join(wanted), text=llm.truncate(text)))
+        "field_recovery", missing_fields=", ".join(wanted), text=llm.truncate(text)), task="field_recovery")
     proposed = result.get("fields") or {}
     accepted, rejected = {}, {}
     for field in wanted:
@@ -372,7 +372,8 @@ def _llm_match(unmatched: list[dict], available: list[dict], taken: set[int]) ->
                          f"unit price {i.get('unit_price')})" for i in unmatched)
     po_text = "\n".join(f"{p['line_number']}. {p['item_code']} {p['description']} (qty {p['quantity']}, "
                         f"unit price {p['unit_price']})" for p in available)
-    result = llm.complete_json(llm.prompt_messages("line_matching", invoice_lines=inv_text, po_lines=po_text))
+    result = llm.complete_json(llm.prompt_messages("line_matching", invoice_lines=inv_text, po_lines=po_text),
+                               task="line_matching")
     by_number = {p["line_number"]: p for p in available}
     wanted = {i["line_number"] for i in unmatched}
     out: dict[int, dict] = {}

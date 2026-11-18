@@ -119,6 +119,7 @@ function AnswerBlock({ message }: { message: Message }) {
       {isTable ? <AnswerTable rows={rows} /> : <AnswerText text={answer.answer} cite={{ id, onOpen: () => setSourcesOpen(true) }} />}
       {answer.notes?.map((note) => <p key={note}>{note}</p>)}
       {answer.route === "sql" && <p className="muted small">Answered directly from the audit database: exact figures, no AI interpretation.</p>}
+      {answer.route === "guardrail" && <p className="muted small">Stopped by a safety check before reaching the AI model.</p>}
       {answer.cached && <p className="muted small">Answered from cache. The same question was asked recently.</p>}
       {answer.route !== "sql" && scores && (
         <details className="answer-more">

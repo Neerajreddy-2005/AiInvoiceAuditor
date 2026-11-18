@@ -87,7 +87,7 @@ def summarize(report: dict) -> str | None:
                                 for d in report["discrepancies"]]
     try:
         return llm.complete(llm.prompt_messages("report_summary", report=json.dumps(compact, ensure_ascii=False)),
-                            max_tokens=400).strip()
+                            task="report_summary", agent="reporting", max_tokens=400).strip()
     except llm.LLMError as exc:
         # The summary is explanatory only; the decision above does not depend on it.
         log.warning("Report summary unavailable: %s", exc)

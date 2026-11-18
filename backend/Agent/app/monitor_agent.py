@@ -19,6 +19,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import mcp_client
 from . import repository as repo
 from . import workflow
 from .extraction import file_sha256
@@ -57,6 +58,10 @@ class InvoiceMonitor:
     def _loop(self) -> None:
         interval = agent_config()["monitor"]["poll_interval_seconds"]
         log.info("Monitoring %s every %ss", settings().incoming_dir, interval)
+        try:
+            mcp_client.wait_until_ready()  # the workflow's tools; the server starts just after this thread
+        except mcp_client.MCPError as exc:
+            log.error("%s; invoices will fail and be retried until it is", exc)
         while not self._stop.is_set():
             errors = []
             for step in (self.process_uploads, self.scan_once, self.retry_failed, self.index_sweep):
@@ -126,11 +131,32 @@ class InvoiceMonitor:
         self._checksums = {k: v for k, v in self._checksums.items() if k[0] in present}
         return processed
 
+    @staticmethod
+    def _skipped(path: Path, info: os.stat_result) -> bool:
+        # From lstat, not is_file: a symlink could point at a file outside the incoming folder.
+        return (not stat.S_ISREG(info.st_mode) or path.name.startswith(".") or path.name.endswith(".meta.json")
+                or path.suffix.lower() in (".tmp", ".part", ".crdownload"))
+
+    def detect_new_files(self) -> list[dict]:
+        """The invoice-watcher MCP tool: files the scans would pick up. Reads only, and shares no state with them."""
+        cfg = agent_config()
+        limit = cfg["extraction"]["limits"]["max_file_mb"] * 1024 * 1024
+        found = []
+        for path in sorted(settings().incoming_dir.iterdir()):
+            info = path.lstat()
+            if self._skipped(path, info) or info.st_size > limit:
+                continue
+            checksum = file_sha256(path)
+            if not repo.get_by_checksum(checksum):
+                found.append({"file_name": path.name, "size": info.st_size, "sha256": checksum,
+                              "file_type": cfg["monitor"]["supported_extensions"].get(path.suffix.lower())})
+            if len(found) >= cfg["monitor"]["max_new_files_per_scan"]:
+                break
+        return found
+
     def _scan_file(self, path: Path, cfg: dict) -> int:
-        # lstat, not is_file: a symlink could point at a file outside the incoming folder.
         info = path.lstat()
-        if (not stat.S_ISREG(info.st_mode) or path.name.startswith(".") or path.name.endswith(".meta.json")
-                or path.suffix.lower() in (".tmp", ".part", ".crdownload")):
+        if self._skipped(path, info):
             return 0
         unchanged = self._last_seen.get(str(path)) == (info.st_size, info.st_mtime)
         self._last_seen[str(path)] = (info.st_size, info.st_mtime)

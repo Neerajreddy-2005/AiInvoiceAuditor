@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import { dateTime, STATUS_LABEL } from "../lib/format";
+import type { AgentsInfo } from "../lib/types";
 import { useInvoices } from "./Invoices";
 
 type Health = { status: string; checks: Record<string, string> };
@@ -18,6 +19,25 @@ function HealthPanel() {
         <li key={name} className={state === "ok" ? "ok" : "bad"}><strong>{name.replace("_", " ")}</strong><span>{state === "ok" ? "Connected" : state}</span></li>
       ))}
     </ul>
+  );
+}
+
+function AgentsPanel() {
+  const { data, error, isPending } = useQuery({ queryKey: ["agents"], queryFn: () => api<AgentsInfo>("/agents") });
+  if (isPending) return <div className="skeleton-rows" aria-busy="true"><span /><span /></div>;
+  if (error) return <p className="error" role="alert">{error.message}</p>;
+  return (
+    <>
+      <ul className="health">
+        {Object.entries(data.a2a).map(([key, agent]) => (
+          <li key={key} className={agent.error ? "bad" : "ok"}><strong>{agent.name || key}</strong><span>{agent.error ?? agent.description}</span></li>
+        ))}
+      </ul>
+      <ul className="health">
+        {data.mcp.map((tool) => <li key={tool.name} className="ok"><strong>{tool.name}</strong><span>{tool.description}</span></li>)}
+      </ul>
+      <p className="muted small">Tracing: {data.tracing ? "on" : "off"} (LangFuse)</p>
+    </>
   );
 }
 
@@ -67,6 +87,7 @@ export default function Log() {
           </div>
         )}
         <section aria-labelledby="health"><header className="section-head"><h2 id="health">Service health</h2></header><HealthPanel /></section>
+        <details className="answer-more"><summary>Agents and tools</summary><AgentsPanel /></details>
       </section>
     </>
   );

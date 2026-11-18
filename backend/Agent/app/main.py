@@ -1,6 +1,8 @@
 """Agent service: runs the invoice monitor and workflow, and the API the
 frontend calls (invoices, feedback, re-validation, questions). Port 8000.
 Every route needs a signed-in user, except the bare /health status.
+The workflow's MCP tools are served separately, on 127.0.0.1:8100 inside
+the container only (app.mcp_server).
 
 Startup fails fast: if PostgreSQL, Redis, Qdrant, mock-erp or the Gemini
 configuration is unavailable, the process exits with a clear error
@@ -23,7 +25,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from . import cache, db, llm, repository as repo, uploads, workflow
+from . import a2a_client, cache, db, llm, mcp_client, mcp_server, repository as repo, tracing, uploads, workflow
 from .auth import current_reviewer
 from .erp_client import client as erp_client
 from .monitor_agent import monitor
@@ -35,7 +37,7 @@ from .settings import agent_config, prompts, rules, settings
 logging.basicConfig(stream=sys.stdout, level=settings().log_level,
                     format="%(asctime)s %(levelname)s [agent] %(name)s: %(message)s")
 # Request logs would otherwise include Gemini URLs, which carry the API key.
-for noisy in ("httpx", "httpx2", "httpcore", "LiteLLM", "litellm", "urllib3"):
+for noisy in ("httpx", "httpx2", "httpcore", "LiteLLM", "litellm", "urllib3", "mcp", "langfuse"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 log = logging.getLogger("agent")
 
@@ -78,11 +80,27 @@ async def lifespan(_: FastAPI):
     interrupted = repo.recover_interrupted()
     if interrupted:
         log.warning("Recovered invoices interrupted by a restart: %s", interrupted)
+    tracing.setup()
+    mcp = mcp_server.start()
+    threading.Thread(target=_log_a2a_agents, name="a2a-check", daemon=True).start()
     threading.Thread(target=indexing.ensure_index_on_startup, name="index-check", daemon=True).start()
     monitor.start()
     yield
     monitor.stop()
+    mcp.should_exit = True
     db.close()
+
+
+def _log_a2a_agents() -> None:
+    """Informational: translation and summaries run in-process while the ADK agents are unreachable."""
+    if not a2a_client.configured():
+        log.info("A2A: ADK_AGENTS_URL is not set; translation and summaries run in-process")
+        return
+    for name, card in a2a_client.cards().items():
+        if "error" in card:
+            log.warning("A2A: %s", card["error"])
+        else:
+            log.info("A2A: discovered %s (%s)", card.get("name"), name)
 
 
 MAX_BODY_BYTES = 64 * 1024  # the same limit as nginx, for hosts where nginx isn't in front
@@ -249,6 +267,21 @@ def health():
 @api.get("/system/health")
 def system_health():
     return _health()[1]
+
+
+@api.get("/agents")
+def agents():
+    """What the Log page shows: the ADK agents' cards (A2A), the MCP tools and whether tracing is on."""
+    try:
+        tools = mcp_client.discover()
+    except Exception:
+        log.exception("MCP discovery failed")
+        tools = {}
+    cards = a2a_client.cards() if a2a_client.configured() else {}
+    return {"a2a": {name: {k: card.get(k) for k in ("name", "description", "version", "skills", "error")}
+                    for name, card in cards.items()},
+            "mcp": [{"name": n, "description": d} for n, d in sorted(tools.items())],
+            "tracing": tracing.enabled()}
 
 
 # ---------------------------------------------------------------- reads

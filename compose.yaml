@@ -8,7 +8,8 @@
 # service receives only the variables it needs.
 # Host ports are bound to 127.0.0.1, so they are not reachable from the network.
 
-name: invoice-auditor
+# This folder's own project (containers, volumes, network), separate from the older "ai-invoice-auditor" stack.
+name: aiinvoiceauditor
 
 services:
   # ------------------------------------------------------------------ data
@@ -52,7 +53,7 @@ services:
   # ------------------------------------------------------------------ apps
   mock-erp:
     build: ./backend/Mock-ERP
-    image: invoice-auditor/mock-erp:1.0
+    image: aiinvoiceauditor/mock-erp:1.0
     environment:
       DB_HOST: ${SUPABASE_DB_HOST}
       DB_PORT: ${SUPABASE_DB_PORT:-5432}
@@ -69,9 +70,24 @@ services:
     restart: on-failure:3
     networks: [invoice-net]
 
+  adk-agents:
+    # Google ADK translation and reporting agents over A2A. Only the agent shares its network,
+    # and it has no host port: the agent caches and counts every call it makes.
+    build: ./backend/ADK-Agents
+    image: aiinvoiceauditor/adk-agents:1.0
+    environment:
+      GOOGLE_API_KEY: ${GEMINI_API_KEY:-}
+      CHAT_MODEL: ${CHAT_MODEL:-}
+      A2A_PUBLIC_HOST: adk-agents          # the address written into the agent cards
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./backend/configs:/app/configs:ro
+    restart: on-failure:3
+    networks: [adk-net]
+
   agent:
     build: ./backend/Agent
-    image: invoice-auditor/agent:1.0
+    image: aiinvoiceauditor/agent:1.0
     environment:
       DB_HOST: ${SUPABASE_DB_HOST}
       DB_PORT: ${SUPABASE_DB_PORT:-5432}
@@ -94,6 +110,11 @@ services:
       QDRANT_URL: http://qdrant:6333
       QDRANT_API_KEY: ${QDRANT_API_KEY}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      ADK_AGENTS_URL: http://adk-agents:8002
+      # Optional LangFuse tracing; off while the keys are empty.
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
@@ -109,8 +130,11 @@ services:
         condition: service_healthy
       mock-erp:
         condition: service_healthy
+      adk-agents:
+        # Started, not healthy: the agent falls back to in-process calls without it.
+        condition: service_started
     restart: on-failure:3
-    networks: [invoice-net, cache-net, demo-net]
+    networks: [invoice-net, cache-net, demo-net, adk-net]
 
   frontend:
     build:
@@ -118,7 +142,7 @@ services:
       args:
         SUPABASE_URL: ${SUPABASE_URL}
         SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY}
-    image: invoice-auditor/frontend:1.0
+    image: aiinvoiceauditor/frontend:1.0
     ports:
       - "127.0.0.1:3000:8080"
     depends_on:
@@ -153,7 +177,7 @@ services:
       args:
         SUPABASE_URL: ${SUPABASE_URL}
         SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY}
-    image: invoice-auditor/publisher:1.0
+    image: aiinvoiceauditor/publisher:1.0
     environment:
       NETLIFY_AUTH_TOKEN: ${NETLIFY_AUTH_TOKEN:-}
       NETLIFY_SITE_ID: ${NETLIFY_SITE_ID:-}
@@ -173,4 +197,6 @@ networks:
     driver: bridge
     internal: true
   demo-net:         # the tunnel reaches the agent and nothing else
+    driver: bridge
+  adk-net:          # the agent reaches the ADK agents; they reach Gemini
     driver: bridge

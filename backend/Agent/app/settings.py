@@ -102,7 +102,11 @@ def rules() -> dict:
 def agent_config() -> dict:
     cfg = _load_yaml("agent.yaml")
     llm = cfg.setdefault("llm", {})
-    llm["chat_model"] = os.getenv("CHAT_MODEL") or llm["chat_model"]
+    default = llm["chat_model"]
+    llm["chat_model"] = os.getenv("CHAT_MODEL") or default
+    # CHAT_MODEL also moves the tasks still on the default; a task given its own model keeps it.
+    llm["task_models"] = {task: llm["chat_model"] if model == default else model
+                          for task, model in (llm.get("task_models") or {}).items()}
     llm["embedding_model"] = os.getenv("EMBED_MODEL") or llm["embedding_model"]
     return cfg
 

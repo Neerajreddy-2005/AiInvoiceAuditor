@@ -97,6 +97,12 @@ export interface Source {
   excerpt: string;
 }
 
+export interface AgentsInfo {
+  a2a: Record<string, { name: string; description: string; version: string; skills: string[]; error: string | null }>;
+  mcp: { name: string; description: string }[];
+  tracing: boolean;
+}
+
 export interface Answer {
   answer: string;
   route?: string;

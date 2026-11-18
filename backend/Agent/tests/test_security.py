@@ -3,7 +3,7 @@
 Run inside the agent image, from the repository root:
   docker run --rm --network none -v "$PWD/backend/Agent/tests:/app/tests:ro" \
     -v "$PWD/backend/configs:/app/configs:ro" -v "$PWD/data/incoming:/data/incoming:ro" \
-    invoice-auditor/agent:1.0 python -m unittest discover -s tests -v
+    aiinvoiceauditor/agent:1.0 python -m unittest discover -s tests -v
 """
 import os
 
@@ -726,6 +726,8 @@ class Uploads(unittest.TestCase):
         with mock.patch.object(workflow.storage, "download", side_effect=fake_download), \
                 mock.patch.object(workflow.repo, "get_invoice", return_value={"file_checksum": checksum}), \
                 mock.patch.object(workflow, "extract", return_value=result), \
+                mock.patch.object(workflow.mcp_client, "call",  # the data-harvester tool, without the transport
+                                  lambda _, file_path, file_type: workflow.harvest(file_path, file_type)), \
                 mock.patch.object(workflow.repo, "save_extraction"):
             workflow._extract(state, "pdf")
             self.assertFalse(seen["path"].exists())
@@ -866,6 +868,17 @@ class Files(unittest.TestCase):
                                   side_effect=lambda _, **kw: real_popen(["sleep", "30"], **kw)):
             with self.assertRaisesRegex(ValueError, "longer than 1 seconds"):
                 extraction._extract_in_child(Path("x"), "pdf")
+
+
+class Models(unittest.TestCase):
+    def test_chat_model_override_moves_only_the_tasks_on_the_default(self):
+        from app import settings
+        with mock.patch.dict(os.environ, {"CHAT_MODEL": "gemini/other"}), \
+                mock.patch.object(settings, "_load_yaml", return_value={"llm": {
+                    "chat_model": "gemini/default", "embedding_model": "gemini/e",
+                    "task_models": {"translation": "gemini/default", "rag_generation": "gemini/strong"}}}):
+            llm_cfg = settings.agent_config.__wrapped__()["llm"]
+        self.assertEqual(llm_cfg["task_models"], {"translation": "gemini/other", "rag_generation": "gemini/strong"})
 
 
 if __name__ == "__main__":

@@ -54,6 +54,18 @@ llm:
   # every chat task. embedding_dimensions must match the embedding model.
   chat_model: gemini/gemini-3.5-flash-lite
   embedding_model: gemini/gemini-embedding-001
+  # Model per task. A task not listed uses chat_model, and a task model that
+  # fails (not enabled for the key, not found) falls back to chat_model.
+  # All on flash-lite for now (the cheapest); change one task here to try another.
+  task_models:
+    query_router: gemini/gemini-3.5-flash-lite
+    query_rewrite: gemini/gemini-3.5-flash-lite
+    rag_reflection: gemini/gemini-3.5-flash-lite
+    report_summary: gemini/gemini-3.5-flash-lite
+    translation: gemini/gemini-3.5-flash-lite
+    field_recovery: gemini/gemini-3.5-flash-lite
+    line_matching: gemini/gemini-3.5-flash-lite
+    rag_generation: gemini/gemini-3.5-flash-lite
   embedding_dimensions: 3072
   timeout_seconds: 60
   num_retries: 2

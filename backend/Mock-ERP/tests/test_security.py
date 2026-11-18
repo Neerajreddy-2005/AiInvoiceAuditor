@@ -2,7 +2,7 @@
 
 Run from the repository root, in the agent image because the test client isn't in Mock-ERP's:
   docker run --rm --network none -w /mock -v "$PWD/backend/Mock-ERP/app:/mock/app:ro" \
-    -v "$PWD/backend/Mock-ERP/tests:/mock/tests:ro" invoice-auditor/agent:1.0 python -m unittest discover -s tests -v
+    -v "$PWD/backend/Mock-ERP/tests:/mock/tests:ro" aiinvoiceauditor/agent:1.0 python -m unittest discover -s tests -v
 """
 import os
 

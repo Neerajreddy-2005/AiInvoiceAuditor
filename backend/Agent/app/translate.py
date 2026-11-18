@@ -59,7 +59,7 @@ def translate(text: str, language_hint: str | None = None) -> dict:
 
     source = llm.truncate(text)
     cfg = agent_config()
-    key = cache.make_key("translation", cfg["llm"]["chat_model"], source)
+    key = cache.make_key("translation", llm.model_for("translation"), source)
     cached = cache.get_json(key)
     if isinstance(cached, dict):
         log.info("Translation cache hit")
@@ -70,7 +70,7 @@ def translate(text: str, language_hint: str | None = None) -> dict:
 
     result = llm.complete_json(
         llm.prompt_messages("translation", text=source, language_hint=language or ""),
-        max_tokens=4000)
+        task="translation", agent="translation", max_tokens=4000)
     translated = str(result.get("translated_text") or "").strip()
     if not translated:
         raise llm.LLMError("Translation returned no text")
